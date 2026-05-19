@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "EC2 g5 instance for LLM inference workshop"
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: g5.2xlarge
+    AllowedValues:
+      - g5.xlarge
+      - g5.2xlarge
+      - g5.4xlarge
+      - g5.12xlarge
+    Description: EC2 instance type with NVIDIA A10G GPU
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair for SSH access
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to launch the instance in
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet to launch the instance in
+
+  HuggingFaceToken:
+    Type: String
+    NoEcho: true
+    Description: HuggingFace token for model access
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for LLM inference instance
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: llm-inference-sg
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  LLMInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 200
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+
+          # Install NVIDIA drivers and CUDA
+          dnf install -y kernel-devel kernel-headers
+          dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+          dnf install -y cuda-toolkit-12-4
+
+          # Install Python and pip
+          dnf install -y python3.11 python3.11-pip
+
+          # Install vLLM
+          pip3.11 install vllm
+
+          # Set HuggingFace token
+          echo "export HF_TOKEN=${HuggingFaceToken}" >> /etc/profile.d/hf.sh
+
+          # Signal completion
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource LLMInstance --region ${AWS::Region}
+      Tags:
+        - Key: Name
+          Value: llm-inference-workshop
+
+Outputs:
+  InstanceId:
+    Description: Instance ID
+    Value: !Ref LLMInstance
+
+  PublicIP:
+    Description: Public IP address
+    Value: !GetAtt LLMInstance.PublicIp
+
+  SSHCommand:
+    Description: SSH command to connect
+    Value: !Sub "ssh -i ${KeyName}.pem ec2-user@${LLMInstance.PublicIp}"
+
+  vLLMCommand:
+    Description: Command to start vLLM server
+    Value: "python -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-3.1-8B-Instruct --host 0.0.0.0 --port 8000"

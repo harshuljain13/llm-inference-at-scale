@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "SageMaker endpoint for LLM inference with vLLM backend"
+
+Parameters:
+  ModelId:
+    Type: String
+    Default: meta-llama/Llama-3.1-8B-Instruct
+    Description: HuggingFace model ID
+
+  InstanceType:
+    Type: String
+    Default: ml.g5.2xlarge
+    AllowedValues:
+      - ml.g5.xlarge
+      - ml.g5.2xlarge
+      - ml.g5.4xlarge
+      - ml.g5.12xlarge
+      - ml.p4d.24xlarge
+    Description: SageMaker instance type
+
+  InitialInstanceCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+    Description: Initial number of instances
+
+  HuggingFaceToken:
+    Type: String
+    NoEcho: true
+    Description: HuggingFace token for model access
+
+Resources:
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  Model:
+    Type: AWS::SageMaker::Model
+    Properties:
+      ModelName: !Sub "llm-inference-${AWS::StackName}"
+      ExecutionRoleArn: !GetAtt SageMakerExecutionRole.Arn
+      PrimaryContainer:
+        Image: !Sub "763104351884.dkr.ecr.${AWS::Region}.amazonaws.com/djl-inference:0.28.0-lmi10.0.0-cu124"
+        Environment:
+          HF_MODEL_ID: !Ref ModelId
+          HF_TOKEN: !Ref HuggingFaceToken
+          OPTION_ROLLING_BATCH: vllm
+          OPTION_MAX_ROLLING_BATCH_SIZE: "64"
+          OPTION_TENSOR_PARALLEL_DEGREE: "1"
+          OPTION_MAX_MODEL_LEN: "4096"
+          OPTION_GPU_MEMORY_UTILIZATION: "0.95"
+
+  EndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: !Sub "llm-inference-config-${AWS::StackName}"
+      ProductionVariants:
+        - VariantName: AllTraffic
+          ModelName: !GetAtt Model.ModelName
+          InstanceType: !Ref InstanceType
+          InitialInstanceCount: !Ref InitialInstanceCount
+          InitialVariantWeight: 1.0
+          ContainerStartupHealthCheckTimeoutInSeconds: 900
+
+  Endpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointName: !Sub "llm-inference-${AWS::StackName}"
+      EndpointConfigName: !GetAtt EndpointConfig.EndpointConfigName
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 1
+      ResourceId: !Sub "endpoint/${Endpoint.EndpointName}/variant/AllTraffic"
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/sagemaker.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint"
+      ScalableDimension: sagemaker:variant:DesiredInstanceCount
+      ServiceNamespace: sagemaker
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: llm-scaling-policy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 5.0
+        PredefinedMetricSpecification:
+          PredefinedMetricType: SageMakerVariantInvocationsPerInstance
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+Outputs:
+  EndpointName:
+    Description: SageMaker endpoint name
+    Value: !GetAtt Endpoint.EndpointName
+
+  EndpointArn:
+    Description: SageMaker endpoint ARN
+    Value: !Ref Endpoint
+
+  InvokeCommand:
+    Description: AWS CLI command to invoke endpoint
+    Value: !Sub |
+      aws sagemaker-runtime invoke-endpoint \
+        --endpoint-name ${Endpoint.EndpointName} \
+        --content-type application/json \
+        --body '{"inputs": "Hello, how are you?", "parameters": {"max_new_tokens": 100}}' \
+        output.json
