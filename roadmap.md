@@ -1,322 +1,188 @@
-# Why this roadmap exists
+# LLM Inference at Scale — Workshop Roadmap
 
-A structured self-study plan to prepare for running a 2-hour workshop covering the full LLM inference stack — from how a transformer generates tokens to production-grade serving with vLLM, SGLang, TensorRT-LLM, Ray, KServe, llm-d, and MoE.
-
----
-
-# How to use this roadmap
-
-- **Read the “8-layer map” once** to orient yourself.
-- Then follow the **Phases (1 → 8)** in order.
-- Each phase has:
-  - **What to learn** (concepts)
-  - **Hands-on** (what to build / measure)
-  - **Primary resources** (minimal, high-signal)
+> From first principles to production-grade serving. 15 modules, 10 hands-on labs, three delivery formats.
 
 ---
 
-# The 8-layer map (so you don’t miss anything)
+## Workshop Formats
 
-1. **Transformer inference mechanics** — prefill vs decode, KV cache, attention variants
-2. **GPU fundamentals for inference** — roofline, memory hierarchy, kernels, profiling intuition
-3. **Memory engineering** — KV cache pressure, fragmentation, paging, eviction, VRAM “napkin math”
-4. **Quantization & compression** — INT8/INT4/NF4/FP8, accuracy/perf tradeoffs, kernel implications
-5. **Inference engines** — vLLM, SGLang, TensorRT-LLM (and when each wins)
-6. **Distributed inference** — tensor/pipeline/expert parallelism, NCCL/collectives, interconnect ceilings
-7. **Serving architecture** — Ray Serve, Kubernetes, KServe, llm-d; routing, autoscaling, rollouts
-8. **Measurement & production ops** — TTFT/TBT/P95, workload replay, SLOs, capacity planning, cost
+| Format | Duration | Coverage | Audience |
+|--------|----------|----------|----------|
+| **Full Workshop** | 2 days (16hrs) | All 15 modules + all labs | Engineers building inference platforms |
+| **Condensed** | 1 day (8hrs) | Modules 00–08 + selected labs | Teams adopting vLLM/SGLang |
+| **Deep Dive** | 2 hours | Pick 2–3 modules from any tier | Conference talks, brown bags |
 
 ---
 
-# What the workshop covers (aligned to the 8-layer map)
+## Module Tiers
 
-1. Transformer forward pass — token generation from first principles
-2. Prefill vs decode — different bottlenecks, different hardware strategies
-3. KV cache — what it stores, why it grows, why fragmentation hurts throughput
-4. Attention variants — MHA, MQA, GQA, FlashAttention, PagedAttention
-5. Quantization — INT8, INT4, NF4, FP8 tradeoffs
-6. Speculative decoding — draft-verify loop, Medusa, EAGLE, n-gram
-7. Batching strategies — static, continuous, chunked prefill
-8. Inference engines — vLLM, SGLang, TensorRT-LLM (when to use which)
-9. Model parallelism — tensor, pipeline, expert parallel
-10. **MoE inference** — routing, expert parallelism, load balancing
-11. Distributed serving with Ray — Ray Serve + vLLM, multi-node deployments
-12. Cloud-native serving — KServe, llm-d on Kubernetes / EKS
-13. Structured output & evaluation — guided decoding, benchmarking methodology
-14. Edge deployment — quantization for mobile/edge, llama.cpp / Jetson / CoreML
+### 🟢 Beginner — Foundations (Modules 00–02, ~3 hrs)
+
+| Module | Title | Key Concepts |
+|--------|-------|--------------|
+| 00 | Why LLM Inference is Different | Autoregressive generation, compute vs memory bound, why ML inference rules don't apply |
+| 01 | Transformer Inference Mechanics | Prefill vs decode, KV cache, attention variants (MHA/MQA/GQA), token generation loop |
+| 02 | GPU and Memory Engineering | Roofline model, memory hierarchy, VRAM budgeting, bandwidth bottlenecks |
+
+**Lab coverage:** Lab 01 (Transformer Forward Pass), Lab 02 (VRAM Calculation)
 
 ---
 
-# Phase 1 — Transformer & inference fundamentals (Layer 1)
+### 🟡 Intermediate — Engine Mastery & Production (Modules 03–10, ~10 hrs)
 
-> **Goal:** Explain token generation end-to-end from memory, without slides.
+| Module | Title | Key Concepts |
+|--------|-------|--------------|
+| 03 | Optimization Techniques | Quantization (INT8/INT4/FP8), FlashAttention, continuous batching, chunked prefill |
+| 04 | Inference Engines Deep Dive | vLLM, SGLang, TensorRT-LLM — architecture, tradeoffs, tuning knobs |
+| 05 | Scaling and Parallelism | Tensor/pipeline/data/expert parallelism, NCCL, interconnect ceilings |
+| 06 | Production Serving Architecture | Ray Serve, KServe, llm-d, routing, autoscaling, rollouts |
+| 07 | Measurement and Operations | TTFT/TBT/P95, workload replay, SLOs, capacity planning |
+| 08 | AWS Deep Dive | EC2 (g5/p4d/p5), SageMaker LMI, Inferentia2, Bedrock |
+| 09 | Structured Output & Guided Decoding | JSON schema constraints, Outlines, grammar-guided generation |
+| 10 | Edge Deployment (Optional) | llama.cpp, GGUF, Apple Silicon, Jetson, CoreML |
 
-## What to learn
-
-- Tokenization → embedding → attention → MLP → logits → sampling
-- The autoregressive loop: one token per forward pass
-- Prefill vs decode:
-  - Prefill: prompt processed in one shot (often compute-bound)
-  - Decode: one token at a time; repeated weight reads (often memory-bandwidth-bound)
-- KV cache: what it stores and why it dominates memory at scale
-- Why fragmentation hurts throughput and how paging helps
-
-## Hands-on
-
-- Implement a tiny transformer forward pass (enough to explain shapes + KV cache role).
-- Draw (and narrate) the prefill vs decode split for a real workload.
-
-## Resources
-
-- **Video (essential):** [Karpathy — Neural Nets: Zero to Hero](https://youtube.com/@karpathy) (GPT episode minimum)
-- **Video:** [Karpathy — Deep Dive into LLMs (3h31m)](https://youtube.com/watch?v=7xTGNNLPyMI)
-- **Video:** [Vizuara AI YouTube](https://youtube.com/@vizuara)
-- **Interactive:** [bbycroft.net/llm](http://bbycroft.net/llm)
+**Lab coverage:** Labs 03–10 (Quantization, vLLM Deployment, SGLang Structured Output, Tensor Parallelism, Ray Serve, EKS/KServe, SageMaker Production, Benchmarking & Monitoring)
 
 ---
 
-# Phase 2 — GPU + performance fundamentals (Layers 2–3)
+### 🔴 Advanced — Research Frontier (Modules 11–14, ~5 hrs)
 
-> **Goal:** Build “roofline thinking” and know what to profile first.
+| Module | Title | Key Concepts |
+|--------|-------|--------------|
+| 11 | Advanced KV Cache Engineering | Beyond PagedAttention: compression, eviction policies, cross-request sharing, quantized KV |
+| 12 | Advanced Speculative Decoding | Gen 1→3 evolution: Medusa, EAGLE, self-speculative, hardware-aware draft selection |
+| 13 | Advanced Disaggregated Serving | Prefill/decode disaggregation, serverless LLM inference, cold start mitigation, llm-d internals |
+| 14 | MoE Inference & Distillation | Expert routing at scale, load balancing, distillation for serving efficiency, DeepSeek-V2/V3 |
 
-## What to learn
-
-- Roofline model; arithmetic intensity; compute vs memory bound
-- GPU memory hierarchy (registers/L1/L2/HBM) and why bandwidth dominates decode
-- Kernel basics: fusion, launch overhead, occupancy (only what you need for inference)
-- KV cache VRAM budgeting: weights + KV + overhead
-
-## Hands-on
-
-- Take a single model run and label the dominant bottleneck (HBM vs compute vs CPU/orchestration).
-- Track VRAM usage as you scale: context length × batch × concurrency.
+**Lab coverage:** TBD (advanced labs planned as batch after content finalization)
 
 ---
 
-# Phase 3 — Core papers (Layer 1–3 vocabulary)
+## Module Dependency Graph
 
-> **Goal:** Speak the standard inference engineering vocabulary.
+```mermaid
+graph TD
+    M00[00: Why LLM Inference<br>is Different] --> M01[01: Transformer<br>Inference Mechanics]
+    M01 --> M02[02: GPU & Memory<br>Engineering]
+    M02 --> M03[03: Optimization<br>Techniques]
+    M03 --> M04[04: Inference Engines<br>Deep Dive]
+    M04 --> M05[05: Scaling &<br>Parallelism]
+    M04 --> M06[06: Production Serving<br>Architecture]
+    M04 --> M09[09: Structured Output<br>& Guided Decoding]
+    M05 --> M06
+    M06 --> M07[07: Measurement<br>& Operations]
+    M07 --> M08[08: AWS Deep Dive]
+    M04 --> M10[10: Edge Deployment]
 
-| Paper                                     | What it solves                                                     | Link                                                 |
-| ----------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------- |
-| PagedAttention / vLLM (UC Berkeley, 2023) | KV cache fragmentation via OS-style memory paging                  | [arxiv 2309.06180](https://arxiv.org/abs/2309.06180) |
-| FlashAttention (NeurIPS 2022)             | IO-aware attention — tiles Q/K/V in SRAM, eliminates N×N HBM reads | [arxiv 2205.14135](https://arxiv.org/abs/2205.14135) |
-| FlashAttention-2 (2023)                   | Better warp partitioning                                           | [arxiv 2307.08691](https://arxiv.org/abs/2307.08691) |
-| FlashAttention-3 (2024)                   | Async + FP8 for H100                                               | [arxiv 2407.08608](https://arxiv.org/abs/2407.08608) |
-| Speculative Decoding (NeurIPS 2023)       | Draft model proposes k tokens; large model verifies in one pass    | [arxiv 2211.17192](https://arxiv.org/abs/2211.17192) |
-| Medusa                                    | Multiple decoding heads for faster generation                      | [arxiv 2401.10774](https://arxiv.org/abs/2401.10774) |
-| SGLang (Stanford)                         | RadixAttention + compiler-driven scheduling                        | [arxiv 2312.07104](https://arxiv.org/abs/2312.07104) |
-| DeepSpeed-FastGen (Microsoft)             | SplitFuse for variable-length generation                           | [arxiv 2401.08671](https://arxiv.org/abs/2401.08671) |
-| DeepSeek-V2 (MoE)                         | MoE routing + expert parallelism + economical inference            | [arxiv 2205.05198](https://arxiv.org/abs/2205.05198) |
+    %% Advanced tier
+    M02 --> M11[11: Advanced KV Cache<br>Engineering]
+    M03 --> M12[12: Advanced Speculative<br>Decoding]
+    M06 --> M13[13: Advanced Disaggregated<br>Serving]
+    M05 --> M14[14: MoE Inference<br>& Distillation]
 
-**Curated paper list (500+ papers):** [github.com/xlite-dev/Awesome-LLM-Inference](http://github.com/xlite-dev/Awesome-LLM-Inference)
+    %% Styling
+    classDef beginner fill:#d4edda,stroke:#28a745
+    classDef intermediate fill:#fff3cd,stroke:#ffc107
+    classDef advanced fill:#f8d7da,stroke:#dc3545
 
----
-
-# Phase 4 — Inference engines deep dive (Layer 5)
-
-> **Goal:** Know what each engine is optimized for and when to reach for which one.
-
-## vLLM
-
-The standard open-source choice. PagedAttention + continuous batching + FlashAttention-2/3. Tensor parallelism built in (`--tensor-parallel-size 8`). Supports speculative decoding (n-gram, EAGLE, Medusa), prefix caching, chunked prefill, multi-LoRA batching.
-
-- [vLLM GitHub](https://github.com/vllm-project/vllm)
-- [Anatomy of vLLM (blog)](https://blog.vllm.ai/2025/09/05/anatomy-of-vllm.html)
-- [Aleksa Gordić — Inside vLLM](https://www.aleksagordic.com/blog/vllm)
-
-## SGLang
-
-Often faster than vLLM for structured generation and multi-call programs. RadixAttention reuses KV cache across branching prompt trees.
-
-- [SGLang GitHub](https://github.com/sgl-project/sglang)
-- [SGLang paper (Stanford)](https://arxiv.org/abs/2312.07104)
-
-## TensorRT-LLM (NVIDIA)
-
-Best raw throughput on NVIDIA GPUs, with compilation and tighter coupling to NVIDIA stack.
-
-- [TensorRT-LLM GitHub](https://github.com/NVIDIA/TensorRT-LLM)
-
-## When to use which
-
-| Scenario                                               | Engine                   |
-| ------------------------------------------------------ | ------------------------ |
-| General open-source serving, fast iteration            | vLLM                     |
-| Structured output, multi-step LLM programs             | SGLang                   |
-| Max throughput on NVIDIA hardware, production-compiled | TensorRT-LLM             |
-| Cost-optimised on AWS, avoiding GPU cost               | Inferentia2 + Neuron SDK |
-
----
-
-# Phase 5 — Practical vLLM performance tuning (Layer 5 + Layer 8)
-
-> **Goal:** A crisp “defaults leave throughput on the floor” segment + safe starter configs.
-
-## Step 0: Make sure you’re on vLLM V1
-
-V1 is meaningfully faster out of the box (async scheduling, chunked prefill defaults, better kernel fusions, torch.compile integration). If you’re on V0, upgrading is often the first win before touching knobs.
-
-## The 6 knobs most teams never touch
-
-1. `--max-num-batched-tokens`
-   Default often ~2048 → **try 8192–32768** (largest throughput lever; defaults skew toward latency)
-2. `--gpu-memory-utilization`
-   Default ~0.90 → **try 0.95** (reclaims VRAM headroom)
-3. `--max-num-seqs`
-   Default: ~256 (V0) / ~1024 (V1) → **try 512–2048** (caps concurrency; bursty traffic silently queues)
-4. `--enable-prefix-caching`
-   Default: OFF → **turn ON** (free win if prompts/RAG chunks repeat)
-5. `--enable-chunked-prefill`
-   Default: OFF in V0; ON in V1 → **verify it’s ON**
-6. CPU core allocation
-   Rule of thumb: **≥ 2 + (#GPUs)** _physical_ cores (CPU starvation can make GPUs look “underutilized”)
-
-## Two starter configs (then profile)
-
-**Throughput-heavy (starting point):**
-`--max-num-batched-tokens 16384 --gpu-memory-utilization 0.95 --enable-prefix-caching --enable-chunked-prefill`
-
-**Latency-sensitive (starting point):**
-`--max-num-batched-tokens 4096 --max-num-seqs 512 --enable-chunked-prefill`
-
-**Caveat:** on very large models (70B+), KV cache pressure may force smaller practical values — benchmark with representative traffic.
-
----
-
-# Phase 6 — Model parallelism & MoE (Layer 6)
-
-> **Goal:** Understand how to scale beyond a single GPU and how MoE changes the serving problem.
-
-## Parallelism types
-
-- **Tensor parallelism:** split weight matrices across GPUs (vLLM: `--tensor-parallel-size N`)
-- **Pipeline parallelism:** stage layers across GPUs (latency ↑, capacity ↑)
-- **Data parallelism:** replicate model, split batch (simple if model fits per GPU)
-- **Expert parallelism (MoE):** experts distributed across GPUs; tokens routed per-step
-
-## MoE inference specifics
-
-- Sparse activation: only k-of-N experts active per token (active params smaller than total params)
-- Routing adds irregularity: load imbalance + all-to-all communication
-- Practical bottlenecks: dispatch cost, imbalance, and network/interconnect ceilings
-- Reference: [DeepSeek-V2 paper](https://arxiv.org/abs/2205.05198)
-
----
-
-# Phase 7 — Distributed serving: Ray, KServe, llm-d (Layer 7)
-
-> **Goal:** Go from “single box” to “org-scale serving”.
-
-## Ray + Ray Serve
-
-Ray is the distributed compute framework often used for multi-node deployments. Ray Serve adds HTTP routing, batching, and replica management.
-
-- Guest lecture resource: Suman Debnath (AnyScale) + Seiji Eicher (vLLM & Ray Serve team) — covered in [Vizuara workshop](https://inference.vizuara.ai)
-- [Ray Serve + vLLM docs](https://docs.ray.io/en/latest/serve/llm/vllm-deployment.html)
-
-## KServe
-
-Kubernetes-native model serving. Handles multi-model routing, canary deployments, autoscaling, and hardware abstraction (vLLM is the backend; KServe is the serving layer).
-
-- [Cloud-Native AI Inference with KServe & llm-d](https://kserve.github.io/website/blog/cloud-native-ai-inference-kserve-llm-d)
-
-## llm-d
-
-Kubernetes controller purpose-built for LLM inference at scale. Focus areas include disaggregated prefill/decode and intelligent routing (often running vLLM as backend).
-
-- [Production-Grade LLM Inference: KServe + llm-d + vLLM](https://llm-d.ai/blog/production-grade-llm-inference-at-scale-kserve-llm-d-vllm)
-
-## The stack relationship
-
-```jsx
-User request
-    ↓
-KServe / llm-d  (routing, autoscaling, model management)
-    ↓
-Ray Serve       (replica mgmt, batching, HTTP)
-    ↓
-vLLM            (PagedAttention, continuous batching, GPU execution)
-    ↓
-FlashAttention / TensorRT kernels
+    class M00,M01,M02 beginner
+    class M03,M04,M05,M06,M07,M08,M09,M10 intermediate
+    class M11,M12,M13,M14 advanced
 ```
 
 ---
 
-# Phase 8 — Measurement, evaluation, and edge deployment (Layer 8 + Edge)
+## Suggested Schedules
 
-> **Goal:** Benchmark honestly, then optionally go edge.
+### 2-Day Full Workshop (16 hrs)
 
-## Performance measurement (don’t skip)
+| Time | Day 1 | Day 2 |
+|------|-------|-------|
+| 09:00–10:30 | M00 + M01 + Lab 01 | M06 + M07 + Lab 10 |
+| 10:30–10:45 | Break | Break |
+| 10:45–12:15 | M02 + Lab 02 | M08 + Lab 09 |
+| 12:15–13:15 | Lunch | Lunch |
+| 13:15–14:45 | M03 + Lab 03 | M09 + M10 |
+| 14:45–15:00 | Break | Break |
+| 15:00–16:30 | M04 + Labs 04–05 | M11 + M12 |
+| 16:30–17:00 | M05 + Lab 06 | M13 + M14 + Wrap-up |
 
-- Key metrics: TTFT, TBT, requests/s, tokens/s, P95 latency
-- Throughput vs latency: optimize the right target
-- Workload replay: representative prompts, output lengths, concurrency
+### 1-Day Condensed (8 hrs)
 
-## Structured output / guided decoding
+| Time | Content |
+|------|---------|
+| 09:00–10:00 | M00 + M01 (concepts only, skip lab) |
+| 10:00–11:00 | M02 + M03 (VRAM math + quantization) |
+| 11:00–12:00 | M04 + Lab 04 (vLLM hands-on) |
+| 12:00–13:00 | Lunch |
+| 13:00–14:00 | M05 + Lab 06 (tensor parallelism) |
+| 14:00–15:00 | M06 + M07 (serving + measurement) |
+| 15:00–16:00 | M08 + Lab 09 (AWS/SageMaker) |
+| 16:00–17:00 | Pick one: M09 or M11 or M13 (audience vote) |
 
-Constrain generation to JSON schema, regex, or grammar. vLLM: `--guided-decoding-backend outlines`. SGLang has native structured generation.
+### 2-Hour Deep Dive (pick a track)
 
-## Edge deployment (optional)
-
-- llama.cpp for CPU/mobile inference
-- TensorRT-LLM on Jetson Orin Nano
-- Apple: CoreML + on-device inference pipeline
-
----
-
-# AWS experimentation path (optional but practical)
-
-## Step 1 — EC2 g5.2xlarge + vLLM (~$1.20/hr)
-
-NVIDIA A10G, 24GB VRAM. Run Llama 3.1 8B in FP16.
-
-```bash
-pip install vllm
-python -m vllm.entrypoints.openai.api_server \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --tensor-parallel-size 1 \
-  --enable-prefix-caching
-```
-
-## Step 2 — Multi-GPU: p4d.24xlarge (8× A100)
-
-Test tensor parallelism: `--tensor-parallel-size 8`. Run 70B models in FP16.
-
-## Step 3 — SageMaker LMI containers
-
-Managed endpoints with DJLServing + vLLM or TensorRT-LLM backend. Auto-scaling, no infra management.
-
-## Step 4 — Inferentia2 (inf2 instances)
-
-Compile with AWS Neuron SDK:
-
-```bash
-optimum-cli export neuron \
-  --model meta-llama/Llama-3.1-8B \
-  --task text-generation \
-  --batch_size 1 \
-  --sequence_length 1024 \
-  --num_cores 8 \
-  ./llama-3.1-8b-neuron/
-```
-
-- [Mixtral on SageMaker + Inferentia2](https://aws.amazon.com/blogs/machine-learning/optimizing-mixtral-8x7b-on-amazon-sagemaker-with-aws-inferentia2/)
-- [High-perf Llama on Inferentia2 (PyTorch blog)](https://pytorch.org/blog/high-performance-llama/)
-
-## Step 5 — EKS + vLLM + KServe + llm-d (production)
-
-Full org-scale stack (routing/model mgmt + LLM-specific scheduling + inference backend).
+| Track | Modules | Best for |
+|-------|---------|----------|
+| **Inference Fundamentals** | M01 + M02 + M03 | New to LLM inference |
+| **Engine Shootout** | M04 + M07 | Evaluating vLLM vs SGLang vs TRT-LLM |
+| **Production at Scale** | M06 + M13 | Platform teams deploying LLMs |
+| **Research Frontier** | M11 + M12 | ML engineers optimizing latency |
+| **MoE & Distillation** | M05 + M14 | Teams serving large sparse models |
 
 ---
 
-# Self-study sequence (6 weeks)
+## Prerequisites
 
-| Week | Focus                                                | Done when…                                                                        |
-| ---- | ---------------------------------------------------- | --------------------------------------------------------------------------------- |
-| 1    | Transformer basics + prefill/decode + KV cache       | Can explain the full token-generation loop + prefill/decode split on a whiteboard |
-| 2    | GPU/roofline + VRAM napkin math                      | Can predict the likely bottleneck for a workload and justify it                   |
-| 3    | PagedAttention + vLLM internals                      | Can explain paging + blocks + why fragmentation kills throughput                  |
-| 4    | FlashAttention + quantization + speculative decoding | Can explain when each helps (and when it doesn’t)                                 |
-| 5    | Distributed inference + MoE                          | Can diagram tensor/pipeline/expert parallelism and key bottlenecks                |
-| 6    | Ray/KServe/llm-d + measurement + dry run             | Full 2-hour rehearsal done; metrics story and tradeoffs are crisp                 |
+**All participants:**
+- Python proficiency (comfortable reading PyTorch code)
+- Basic understanding of neural networks (what a forward pass is)
+- Familiarity with Linux CLI and SSH
+
+**Intermediate tier additionally:**
+- Experience deploying ML models (any framework)
+- Basic Docker/Kubernetes awareness
+- AWS account with GPU instance access (g5.2xlarge minimum)
+
+**Advanced tier additionally:**
+- Read at least one of: PagedAttention paper, FlashAttention paper, or vLLM architecture blog
+- Comfort with distributed systems concepts (replication, sharding, load balancing)
+- Experience profiling GPU workloads (nvidia-smi, nsight, or similar)
+
+---
+
+## What's New in 2026
+
+The advanced tier (Modules 11–14) represents cutting-edge research and production techniques from 2025–2026:
+
+| Module | Why it matters now |
+|--------|-------------------|
+| **11: Advanced KV Cache Engineering** | KV cache is the #1 memory bottleneck at scale. New techniques (quantized KV, cross-request sharing, learned eviction) reduce memory 2–4× without quality loss. |
+| **12: Advanced Speculative Decoding** | Gen 3 speculative methods (self-speculative, hardware-aware drafting) achieve 2–3× speedup without separate draft models. Production-ready in vLLM 0.8+. |
+| **13: Advanced Disaggregated Serving** | Separating prefill from decode unlocks independent scaling, serverless inference, and 40–60% cost reduction. llm-d and Mooncake are production-proven. |
+| **14: MoE Inference & Distillation** | DeepSeek-V3/R1 proved MoE at scale. Distillation converts 600B MoE → 70B dense with minimal quality loss, slashing serving costs. |
+
+**Key research incorporated:** TurboQuant (FP4), KIVI/Gear (KV compression), EAGLE-2/Sequoia (speculative trees), DistServe/Splitwise (disaggregation), DeepSeek-V2/V3 (MoE routing).
+
+---
+
+## Repository Structure
+
+```
+llm-inference-at-scale/
+├── 00–14_*.md          # Module content (15 files)
+├── labs/               # 10 hands-on labs (lab_01 through lab_10)
+├── findings/           # Research papers, blogs, advanced content proposals
+├── reference/          # Glossary, cheat sheet, cost calculator, setup guide
+├── slides/             # Workshop outline for presentation
+└── .kiro/specs/        # Requirements, design, and task specs
+```
+
+---
+
+## Total Content
+
+- **15 modules** (~600+ pages of technical content)
+- **10 labs** with infrastructure scaffolding
+- **3 research documents** in findings/
+- **6 reference materials** (glossary, cheat sheet, vLLM quick ref, cost calculator, setup guide, post-workshop resources)

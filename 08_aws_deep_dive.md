@@ -1282,6 +1282,509 @@ SPOT_SAVINGS = {
 
 ---
 
+
+## Advanced AWS Inference Patterns
+
+### Disaggregated Inference with llm-d on AWS
+
+AWS officially supports **llm-d** (April 2026) for disaggregated inference — separating prefill and decode into independent, independently-scalable pools connected via high-speed KV cache transfer over EFA.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    llm-d DISAGGREGATED INFERENCE                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   ┌──────────┐     ┌─────────────┐                                  │
+│   │  Client  │────▶│  Router /   │                                  │
+│   └──────────┘     │  Scheduler  │                                  │
+│                    └──────┬──────┘                                  │
+│                           │                                         │
+│              ┌────────────┴────────────┐                            │
+│              ▼                         ▼                            │
+│   ┌─────────────────────┐   ┌─────────────────────┐                │
+│   │   PREFILL POOL      │   │   DECODE POOL       │                │
+│   │  (compute-bound)    │   │  (memory-bound)     │                │
+│   │                     │   │                     │                │
+│   │  • p5.48xlarge      │   │  • inf2.48xlarge    │                │
+│   │  • High FLOPS       │   │  • High mem BW      │                │
+│   │  • Batch prefills   │   │  • Token-by-token   │                │
+│   │  • Scale on queue   │   │  • Scale on active  │                │
+│   └──────────┬──────────┘   └──────────▲──────────┘                │
+│              │                         │                            │
+│              │    KV Cache Transfer    │                            │
+│              └────────────────────────▶│                            │
+│                   via EFA (400 Gbps)                                │
+│                                                                     │
+│   Benefits:                                                         │
+│   • Prefill pool uses compute-optimized GPUs (H100)                 │
+│   • Decode pool uses memory-BW-optimized chips (Inferentia2)        │
+│   • Each pool scales independently based on its bottleneck          │
+│   • KV cache transfer via EFA avoids recomputation                  │
+│   • 40-60% cost reduction vs monolithic serving at scale            │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Key configuration:**
+
+```yaml
+# llm-d deployment config (EKS-based)
+apiVersion: llm-d.aws/v1alpha1
+kind: InferencePool
+metadata:
+  name: llama-70b-disaggregated
+spec:
+  model: meta-llama/Llama-3.1-70B-Instruct
+  prefillPool:
+    instanceType: p5.48xlarge
+    replicas: 2
+    maxBatchSize: 32
+    maxSequenceLength: 8192
+  decodePool:
+    instanceType: inf2.48xlarge
+    replicas: 4
+    maxConcurrentSequences: 256
+  kvCacheTransfer:
+    transport: efa          # 400 Gbps RDMA
+    compression: none       # Lossless for accuracy
+    maxCacheSizeGB: 64
+  router:
+    strategy: least-kv-pending
+    prefillQueueThreshold: 16
+```
+
+---
+
+### EAGLE-Based Adaptive Speculative Decoding on SageMaker
+
+SageMaker LMI natively supports **EAGLE** (Extrapolation Algorithm for Greater Language-model Efficiency) — an adaptive speculative decoding method that uses a lightweight draft head trained on the target model's hidden states rather than a separate draft model.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    EAGLE SPECULATIVE DECODING                       │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Traditional Speculative Decoding:                                 │
+│   Draft Model (1.3B) → Speculate K tokens → Verify with 70B        │
+│   Problem: Draft model quality varies, fixed speculation length     │
+│                                                                     │
+│   EAGLE Approach:                                                   │
+│   ┌─────────────────────────────────────────────────────────────┐   │
+│   │  Target Model (70B)                                         │   │
+│   │  ┌─────────────────────────────────────────────────────┐    │   │
+│   │  │  Hidden States (layer N-1)                          │    │   │
+│   │  └────────────────────┬────────────────────────────────┘    │   │
+│   │                       │                                     │   │
+│   │                       ▼                                     │   │
+│   │  ┌─────────────────────────────────────────────────────┐    │   │
+│   │  │  EAGLE Draft Head (~0.5B params, trained on target) │    │   │
+│   │  │  • Extrapolates next hidden states                  │    │   │
+│   │  │  • Tree-structured speculation (not linear)         │    │   │
+│   │  │  • Adaptive depth: 2-8 tokens based on confidence   │    │   │
+│   │  └────────────────────┬────────────────────────────────┘    │   │
+│   │                       │                                     │   │
+│   │                       ▼                                     │   │
+│   │  Verify all candidates in single forward pass               │   │
+│   │  Accept rate: 70-85% (vs 50-60% for separate draft model)  │   │
+│   └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│   Speedup: 2.5-3.5× for greedy, 2-2.8× for sampling                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**SageMaker LMI deployment with EAGLE:**
+
+```python
+# sagemaker_eagle_deployment.py
+"""Deploy LLM with EAGLE speculative decoding on SageMaker."""
+
+from sagemaker.djl_inference import DJLModel
+import sagemaker
+
+def deploy_eagle_endpoint(
+    model_id: str = "meta-llama/Llama-3.1-70B-Instruct",
+    eagle_model_id: str = "yuhuili/EAGLE-LLaMA3-Instruct-70B",
+    instance_type: str = "ml.p4d.24xlarge",
+    endpoint_name: str = "llama-70b-eagle",
+):
+    """Deploy with EAGLE speculative decoding enabled."""
+
+    role = sagemaker.get_execution_role()
+    image_uri = sagemaker.image_uris.retrieve(
+        framework="djl-lmi", region="us-east-1", version="0.29.0"
+    )
+
+    model = DJLModel(
+        model_id=model_id,
+        role=role,
+        image_uri=image_uri,
+        env={
+            "OPTION_ROLLING_BATCH": "vllm",
+            "OPTION_TENSOR_PARALLEL_DEGREE": "8",
+            "OPTION_MAX_MODEL_LEN": "4096",
+            "OPTION_GPU_MEMORY_UTILIZATION": "0.92",
+            # EAGLE configuration
+            "OPTION_SPECULATIVE_MODEL": eagle_model_id,
+            "OPTION_SPECULATIVE_METHOD": "eagle",
+            "OPTION_NUM_SPECULATIVE_TOKENS": "5",
+            "OPTION_SPECULATIVE_DISABLE_BY_BATCH_SIZE": "8",
+        },
+    )
+
+    return model.deploy(
+        instance_type=instance_type,
+        initial_instance_count=1,
+        endpoint_name=endpoint_name,
+        container_startup_health_check_timeout=1200,
+    )
+```
+
+> **Note:** EAGLE automatically disables speculation when batch size exceeds the threshold (default 8), since the verification overhead outweighs the latency benefit at high concurrency.
+
+---
+
+### Speculative Decoding on Trainium/Inferentia2 with vLLM
+
+vLLM's Neuron backend (v0.6+) supports speculative decoding on Trainium and Inferentia2, enabling latency reduction on cost-optimized silicon. The Neuron compiler handles draft/target model co-location across NeuronCores.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│            SPECULATIVE DECODING ON NEURON DEVICES                   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   inf2.24xlarge (6 chips × 4 cores = 24 NeuronCores)               │
+│                                                                     │
+│   ┌─────────────────────────────────────────────────────────────┐   │
+│   │  Chip 0-1 (8 cores)         │  Chip 2-5 (16 cores)         │   │
+│   │  ┌───────────────────────┐  │  ┌───────────────────────┐   │   │
+│   │  │  Draft Model (8B)     │  │  │  Target Model (70B)   │   │   │
+│   │  │  • 2 NeuronCores      │  │  │  • 16 NeuronCores     │   │   │
+│   │  │  • Speculate K=5      │  │  │  • Verify + accept    │   │   │
+│   │  │  • ~5ms per draft     │  │  │  • ~40ms per verify   │   │   │
+│   │  └───────────────────────┘  │  └───────────────────────┘   │   │
+│   └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│   Without speculation: 70B decode = ~80ms/token                     │
+│   With speculation:    5 drafts + 1 verify = ~45ms → accept ~3.5    │
+│   Effective: ~13ms/token (6× improvement in tokens/sec)             │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Deployment with vLLM on Neuron:**
+
+```bash
+# Launch vLLM with speculative decoding on inf2
+docker run -d --device=/dev/neuron0 --device=/dev/neuron1 \
+    --device=/dev/neuron2 --device=/dev/neuron3 \
+    --device=/dev/neuron4 --device=/dev/neuron5 \
+    -p 8000:8000 \
+    vllm/vllm-neuron:latest \
+    --model meta-llama/Llama-3.1-70B-Instruct \
+    --speculative-model meta-llama/Llama-3.1-8B-Instruct \
+    --num-speculative-tokens 5 \
+    --device neuron \
+    --tensor-parallel-size 16 \
+    --speculative-draft-tensor-parallel-size 2 \
+    --max-num-seqs 32 \
+    --block-size 8
+```
+
+> **Constraint:** Both draft and target models must be compiled with matching sequence lengths. Recompilation is required when changing speculation depth or batch size.
+
+---
+
+### Case Study: Amazon Rufus — Multi-Node Trainium Inference at Scale
+
+Amazon Rufus (the AI shopping assistant) runs multi-node Trainium inference to serve hundreds of millions of queries, demonstrating production-grade LLM serving on custom silicon at Prime Day scale.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    AMAZON RUFUS ARCHITECTURE                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Scale: Hundreds of millions of queries/day (Prime Day 2025)       │
+│   Result: 2× inference speed vs prior GPU-based deployment          │
+│                                                                     │
+│   ┌─────────────────────────────────────────────────────────────┐   │
+│   │                    Inference Cluster                         │   │
+│   │                                                             │   │
+│   │   ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐      │   │
+│   │   │ trn1.32 │  │ trn1.32 │  │ trn1.32 │  │ trn1.32 │      │   │
+│   │   │ 16 chips│  │ 16 chips│  │ 16 chips│  │ 16 chips│      │   │
+│   │   └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘      │   │
+│   │        │             │             │             │          │   │
+│   │        └─────────────┴──────┬──────┴─────────────┘          │   │
+│   │                             │                               │   │
+│   │                    EFA Fabric (400 Gbps)                     │   │
+│   │                    NeuronLink cross-node                     │   │
+│   │                                                             │   │
+│   └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│   Key Design Decisions:                                             │
+│   • Multi-node tensor parallelism across trn1.32xlarge instances    │
+│   • EFA for all-reduce and KV cache synchronization                 │
+│   • Neuron compiler optimizations: operator fusion, layout xforms   │
+│   • Dynamic batching tuned for shopping query latency SLAs          │
+│   • Graceful degradation: automatic fallback to smaller model       │
+│     under extreme load (Prime Day traffic spikes)                   │
+│                                                                     │
+│   Results:                                                          │
+│   • 2× inference throughput vs equivalent GPU deployment            │
+│   • 50%+ cost reduction per query                                   │
+│   • Sub-200ms P99 latency for product recommendations              │
+│   • Zero downtime during Prime Day 2025 traffic surge               │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Lessons for practitioners:**
+
+1. **Compile once, serve forever** — Rufus pre-compiles model graphs for fixed batch/sequence configs, eliminating JIT overhead
+2. **Multi-node TP over EFA** — For models exceeding single-node memory, EFA provides near-local bandwidth for tensor parallel communication
+3. **Heterogeneous fallback** — Under extreme load, route overflow traffic to a smaller quantized model rather than dropping requests
+4. **Warmup pools** — Pre-warmed Trainium instances eliminate cold-start latency during traffic spikes
+
+---
+
+### Multi-LoRA Serving on SageMaker
+
+SageMaker LMI supports serving **dozens of LoRA adapters** on a single endpoint, sharing the base model weights while dynamically loading task-specific adapters per request. This eliminates the need for separate endpoints per fine-tuned model.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    MULTI-LORA ARCHITECTURE                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Single SageMaker Endpoint (ml.g5.12xlarge)                        │
+│                                                                     │
+│   ┌─────────────────────────────────────────────────────────────┐   │
+│   │  Base Model: Llama 3.1 8B (shared, loaded once)             │   │
+│   │  ═══════════════════════════════════════════════             │   │
+│   │                                                             │   │
+│   │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐       │   │
+│   │  │ LoRA #1  │ │ LoRA #2  │ │ LoRA #3  │ │ LoRA #N  │       │   │
+│   │  │ Customer │ │ Medical  │ │ Legal    │ │  ...     │       │   │
+│   │  │ Support  │ │ Summary  │ │ Extract  │ │          │       │   │
+│   │  │ ~16 MB   │ │ ~16 MB   │ │ ~16 MB   │ │ ~16 MB   │       │   │
+│   │  └──────────┘ └──────────┘ └──────────┘ └──────────┘       │   │
+│   │                                                             │   │
+│   │  Adapter selection: per-request header                       │   │
+│   │  Hot-swap latency: < 1ms (adapters cached in GPU memory)     │   │
+│   │  Max adapters: limited by GPU memory (~50-100 for rank-16)   │   │
+│   └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│   Cost Impact:                                                      │
+│   • Without Multi-LoRA: 20 models × $1.21/hr = $24.20/hr           │
+│   • With Multi-LoRA:    1 endpoint × $5.67/hr = $5.67/hr           │
+│   • Savings: 77%                                                    │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Deployment configuration:**
+
+```python
+# multi_lora_sagemaker.py
+"""Deploy multi-LoRA endpoint on SageMaker."""
+
+from sagemaker.djl_inference import DJLModel
+import sagemaker
+import json
+import boto3
+
+
+def deploy_multi_lora_endpoint(
+    base_model: str = "meta-llama/Llama-3.1-8B-Instruct",
+    lora_adapters: dict = None,
+    instance_type: str = "ml.g5.12xlarge",
+    endpoint_name: str = "multi-lora-endpoint",
+):
+    """Deploy base model with multiple LoRA adapters."""
+
+    if lora_adapters is None:
+        lora_adapters = {
+            "customer-support": "s3://my-bucket/loras/customer-support/",
+            "medical-summary": "s3://my-bucket/loras/medical-summary/",
+            "legal-extraction": "s3://my-bucket/loras/legal-extraction/",
+        }
+
+    role = sagemaker.get_execution_role()
+    image_uri = sagemaker.image_uris.retrieve(
+        framework="djl-lmi", region="us-east-1", version="0.29.0"
+    )
+
+    model = DJLModel(
+        model_id=base_model,
+        role=role,
+        image_uri=image_uri,
+        env={
+            "OPTION_ROLLING_BATCH": "vllm",
+            "OPTION_TENSOR_PARALLEL_DEGREE": "4",
+            "OPTION_GPU_MEMORY_UTILIZATION": "0.90",
+            "OPTION_MAX_LORAS": "32",
+            "OPTION_MAX_LORA_RANK": "16",
+            "OPTION_ENABLE_LORA": "true",
+            "OPTION_MAX_CPU_LORAS": "64",  # Cache more on CPU
+        },
+    )
+
+    return model.deploy(
+        instance_type=instance_type,
+        initial_instance_count=1,
+        endpoint_name=endpoint_name,
+        container_startup_health_check_timeout=900,
+    )
+
+
+def invoke_with_lora(endpoint_name: str, prompt: str, adapter_name: str):
+    """Invoke endpoint with a specific LoRA adapter."""
+
+    runtime = boto3.client("sagemaker-runtime")
+
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 256,
+            "adapter_name": adapter_name,  # Select LoRA per request
+        },
+    }
+
+    response = runtime.invoke_endpoint(
+        EndpointName=endpoint_name,
+        ContentType="application/json",
+        Body=json.dumps(payload),
+    )
+
+    return json.loads(response["Body"].read().decode())
+```
+
+---
+
+### Capacity-Aware Inference with Automatic Instance Fallback
+
+Production LLM deployments must handle GPU capacity constraints gracefully. A capacity-aware routing layer automatically falls back across instance types when primary capacity is unavailable — critical during GPU shortages or regional outages.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    CAPACITY-AWARE FALLBACK                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Request → Router                                                  │
+│              │                                                      │
+│              ├─── Try: p5.48xlarge (H100, lowest latency)           │
+│              │    └── Available? ✓ → Route here                     │
+│              │                   ✗ ↓                                │
+│              ├─── Try: p4d.24xlarge (A100, good perf)               │
+│              │    └── Available? ✓ → Route here                     │
+│              │                   ✗ ↓                                │
+│              ├─── Try: g5.48xlarge (A10G, acceptable)               │
+│              │    └── Available? ✓ → Route here (quantized model)   │
+│              │                   ✗ ↓                                │
+│              └─── Try: inf2.48xlarge (Inferentia2, cost-opt)        │
+│                   └── Available? ✓ → Route here (compiled model)   │
+│                                  ✗ → Queue + alert                 │
+│                                                                     │
+│   Each tier has pre-deployed model variants:                        │
+│   • p5/p4d: Full precision, max batch size                          │
+│   • g5: AWQ INT4 quantized, reduced batch                           │
+│   • inf2: Neuron-compiled, fixed batch/seq                          │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Implementation with SageMaker inference components:**
+
+```python
+# capacity_aware_routing.py
+"""Capacity-aware inference with multi-instance fallback."""
+
+import boto3
+import json
+from typing import Optional
+
+
+class CapacityAwareRouter:
+    """Routes inference requests across instance tiers with fallback."""
+
+    def __init__(self, endpoint_name: str):
+        self.runtime = boto3.client("sagemaker-runtime")
+        self.endpoint_name = endpoint_name
+        # Ordered by preference (best performance first)
+        self.variants = [
+            "h100-primary",
+            "a100-fallback",
+            "a10g-quantized",
+            "inf2-compiled",
+        ]
+
+    def invoke(self, prompt: str, max_tokens: int = 256) -> Optional[str]:
+        """Try each variant in priority order until one succeeds."""
+
+        payload = json.dumps({
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": max_tokens},
+        })
+
+        for variant in self.variants:
+            try:
+                response = self.runtime.invoke_endpoint(
+                    EndpointName=self.endpoint_name,
+                    ContentType="application/json",
+                    Body=payload,
+                    TargetVariant=variant,
+                )
+                result = json.loads(response["Body"].read().decode())
+                return result[0]["generated_text"]
+            except self.runtime.exceptions.ModelError:
+                continue  # Variant overloaded, try next
+            except Exception:
+                continue  # Capacity unavailable, try next
+
+        return None  # All variants exhausted
+
+
+# SageMaker endpoint config with multiple variants
+ENDPOINT_CONFIG = {
+    "EndpointConfigName": "capacity-aware-config",
+    "ProductionVariants": [
+        {
+            "VariantName": "h100-primary",
+            "ModelName": "llama-70b-fp16",
+            "InstanceType": "ml.p5.48xlarge",
+            "InitialInstanceCount": 2,
+            "InitialVariantWeight": 80,
+        },
+        {
+            "VariantName": "a100-fallback",
+            "ModelName": "llama-70b-fp16",
+            "InstanceType": "ml.p4d.24xlarge",
+            "InitialInstanceCount": 1,
+            "InitialVariantWeight": 15,
+        },
+        {
+            "VariantName": "a10g-quantized",
+            "ModelName": "llama-70b-awq-int4",
+            "InstanceType": "ml.g5.48xlarge",
+            "InitialInstanceCount": 1,
+            "InitialVariantWeight": 4,
+        },
+        {
+            "VariantName": "inf2-compiled",
+            "ModelName": "llama-70b-neuron",
+            "InstanceType": "ml.inf2.48xlarge",
+            "InitialInstanceCount": 1,
+            "InitialVariantWeight": 1,
+        },
+    ],
+}
+```
+
+> **Production tip:** Combine capacity-aware routing with SageMaker's built-in auto-scaling. Set aggressive scale-out on the primary variant and conservative scale-out on fallback variants. Use CloudWatch alarms on `Invocation4XXErrors` to detect capacity exhaustion early.
+
+---
+
 ## Key Takeaways
 
 1. **Match instance to model size** - Use VRAM calculations to select appropriate instance
@@ -1297,6 +1800,14 @@ SPOT_SAVINGS = {
 6. **Spot for dev/test** - 65% savings for non-production workloads
 
 7. **Reserved for production** - 30-50% savings for predictable workloads
+
+8. **Disaggregated inference (llm-d)** - Separate prefill/decode pools for independent scaling, 40-60% cost reduction
+
+9. **EAGLE speculative decoding** - 2.5-3.5× speedup with native SageMaker LMI support
+
+10. **Multi-LoRA serving** - Dozens of fine-tuned models on one endpoint, 77% cost savings vs separate endpoints
+
+11. **Capacity-aware routing** - Automatic fallback across instance tiers for resilience during GPU shortages
 
 ---
 
@@ -1319,3 +1830,8 @@ In Lab 9, you will:
 3. [AWS Bedrock Documentation](https://docs.aws.amazon.com/bedrock/)
 4. [EC2 GPU Instance Types](https://aws.amazon.com/ec2/instance-types/)
 5. [SageMaker Pricing](https://aws.amazon.com/sagemaker/pricing/)
+6. [llm-d: Disaggregated Serving for LLMs](https://github.com/llm-d/llm-d)
+7. [EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty](https://arxiv.org/abs/2401.15077)
+8. [vLLM on AWS Neuron](https://docs.aws.amazon.com/neuron/latest/frameworks/vllm-index.html)
+9. [Amazon Rufus — AI Shopping Assistant](https://aws.amazon.com/blogs/machine-learning/how-amazon-rufus-uses-trainium/)
+10. [SageMaker Multi-LoRA Inference](https://docs.aws.amazon.com/sagemaker/latest/dg/large-model-inference-lora.html)

@@ -617,3 +617,62 @@ spec:
 2. KServe Documentation: https://kserve.github.io/website/
 3. llm-d Paper: "Disaggregated LLM Inference" (2024)
 4. OWASP LLM Security Guidelines
+
+
+---
+
+## 2025-2026 Updates: Production Serving Advances
+
+### Ray Serve 2.40+: 88% Latency Reduction
+
+Ray Serve's March 2026 release introduced HAProxy integration for external load balancing:
+
+```
+Client → HAProxy (L7 routing) → Ray Serve Replicas → vLLM
+```
+
+**Key improvements:**
+- Zero-copy data path eliminates serialization overhead
+- Async request handling pipeline
+- **88% latency reduction + 11.1x throughput** vs previous versions
+- External routing (HAProxy/Envoy) recommended beyond 5K req/s
+
+**Source**: [Anyscale Blog, Mar 2026](https://www.anyscale.com/blog/ray-serve-inference-lower-latency-higher-throughput-haproxy)
+
+### Custom Request Routing: 60% TTFT Reduction
+
+Prefix-aware routing directs requests sharing common prefixes to the same replica for KV cache hits:
+
+| Configuration | TTFT P95 | Throughput | GPU Util |
+|--------------|----------|------------|----------|
+| Unified (baseline) | 850ms | 1,200 tok/s | 65% |
+| Custom routing | 340ms | 1,800 tok/s | 82% |
+| + Prefix-aware | 280ms | 2,100 tok/s | 85% |
+
+**Source**: [Anyscale Blog, Sep 2025](https://www.anyscale.com/blog/ray-serve-faster-first-token-custom-routing)
+
+### Cold Start Mitigation: Model Streaming
+
+Cold starts occur during autoscaling, spot eviction, rolling deploys, and model swaps. Loading a 70B FP16 model from disk takes **45-90 seconds**.
+
+**Solution**: Stream model weights directly from object storage to GPU memory, bypassing disk.
+
+| Method | 8B Model | 70B Model | Improvement |
+|--------|----------|-----------|-------------|
+| S3 → Disk → CPU → GPU | 15s | 90s | Baseline |
+| S3 Express → GPU (streaming) | 3s | 15s | **5-6x** |
+| Instance store (cached) | 2s | 12s | Best case |
+
+**Source**: [Azure DevBlog, May 2026](https://devblogs.microsoft.com/azure-sdk/eliminate-llm-cold-starts-load-models-up-to-6x-faster-with-azure-blob-storage-and-runai-model-streamer/)
+
+### llm-d: Disaggregated Serving Production on AWS (Apr 2026)
+
+AWS officially supports llm-d for disaggregated prefill/decode:
+- Separate prefill and decode GPU pools
+- KV cache transfer via EFA RDMA (~50ms for 2.5GB)
+- Intelligent routing based on request characteristics
+- Independent autoscaling per pool
+
+See **Module 13** for full disaggregated serving deep dive.
+
+**Source**: [AWS Blog, Apr 2026](https://aws.amazon.com/blogs/machine-learning/introducing-disaggregated-inference-on-aws-powered-by-llm-d/)

@@ -408,6 +408,187 @@ print(result)
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### Wide Expert Parallelism (Wide-EP)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              WIDE EXPERT PARALLELISM (Anyscale)                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Problem: Standard EP distributes experts across minimum GPUs      │
+│   needed for memory. But MoE inference is memory-bandwidth bound    │
+│   — each expert's weights must be read from HBM for every token.    │
+│                                                                     │
+│   Wide-EP Insight: Spread experts across MORE GPUs than needed      │
+│   for memory, using tensor parallelism WITHIN each expert.          │
+│                                                                     │
+│   Standard EP (8 experts, 8 GPUs):                                  │
+│   ┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐│
+│   │ E0   ││ E1   ││ E2   ││ E3   ││ E4   ││ E5   ││ E6   ││ E7   ││
+│   │GPU 0 ││GPU 1 ││GPU 2 ││GPU 3 ││GPU 4 ││GPU 5 ││GPU 6 ││GPU 7 ││
+│   └──────┘└──────┘└──────┘└──────┘└──────┘└──────┘└──────┘└──────┘│
+│                                                                     │
+│   Wide-EP (8 experts, 16 GPUs, TP=2 per expert):                    │
+│   ┌────────────┐┌────────────┐┌────────────┐┌────────────┐         │
+│   │  Expert 0  ││  Expert 1  ││  Expert 2  ││  Expert 3  │         │
+│   │GPU 0│GPU 1 ││GPU 2│GPU 3 ││GPU 4│GPU 5 ││GPU 6│GPU 7 │         │
+│   └────────────┘└────────────┘└────────────┘└────────────┘         │
+│   ┌────────────┐┌────────────┐┌────────────┐┌────────────┐         │
+│   │  Expert 4  ││  Expert 5  ││  Expert 6  ││  Expert 7  │         │
+│   │GPU 8│GPU 9 ││GPU10│GPU11 ││GPU12│GPU13 ││GPU14│GPU15 │         │
+│   └────────────┘└────────────┘└────────────┘└────────────┘         │
+│                                                                     │
+│   Why it works:                                                     │
+│   • Each expert's weight read is parallelized across 2 GPUs         │
+│   • 2× memory bandwidth per expert → 2× faster expert execution    │
+│   • Solves the "double penalty": MoE has more total params AND      │
+│     lower arithmetic intensity than dense models                    │
+│   • Anyscale showed 1.5-2× throughput improvement over standard EP  │
+│                                                                     │
+│   Trade-off: Uses more GPUs, but each GPU is better utilized        │
+│   because memory bandwidth (the bottleneck) is parallelized.        │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### The MoE Double Penalty (When Dense Beats MoE)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│           THE MOE DOUBLE PENALTY (arxiv:2603.08960)                 │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   MoE models suffer two compounding penalties at inference time:    │
+│                                                                     │
+│   Penalty 1: Routing Fragmentation                                  │
+│   ═══════════════════════════════                                   │
+│   • Tokens in a batch get routed to different experts               │
+│   • Each expert processes a SUBSET of the batch                     │
+│   • Effective batch size per expert = total_batch / num_experts     │
+│   • Smaller batches → lower GPU compute utilization                 │
+│   • Dense model processes ALL tokens together (full batch)          │
+│                                                                     │
+│   Penalty 2: KV Cache Memory Pressure                               │
+│   ═══════════════════════════════════                               │
+│   • MoE models have same attention layers as dense equivalents      │
+│   • But total model memory is much larger (all experts in VRAM)     │
+│   • Less VRAM available for KV cache                                │
+│   • Fewer concurrent sequences → lower throughput                   │
+│   • Example: Mixtral 8x7B uses 87 GB for weights vs 13 GB for      │
+│     a dense 13B with equivalent active compute                      │
+│                                                                     │
+│   ─────────────────────────────────────────────────────────────    │
+│                                                                     │
+│   When Dense Models Win:                                            │
+│   ┌─────────────────────────────────────────────────────────────┐   │
+│   │ Scenario                    │ Winner │ Why                   │   │
+│   │─────────────────────────────┼────────┼───────────────────────│   │
+│   │ High batch, short context   │ Dense  │ Routing fragmentation │   │
+│   │ Memory-constrained deploy   │ Dense  │ KV cache pressure     │   │
+│   │ Latency-critical (small TP) │ Dense  │ AllToAll overhead     │   │
+│   │ Low batch, long context     │ MoE    │ Less compute/token    │   │
+│   │ Quality-per-FLOP priority   │ MoE    │ More params, same cost│   │
+│   │ Wide-EP available (many GPU)│ MoE    │ Penalties mitigated   │   │
+│   └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│   Key insight: MoE advantage grows with GPU count. On few GPUs,     │
+│   the double penalty can make a dense model faster at serving.      │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### High-Performance AllToAll for Expert Routing
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│        PERPLEXITY: 10× FASTER ALL-TO-ALL ON AWS EFA                │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   The AllToAll bottleneck:                                          │
+│   • Expert parallelism requires AllToAll to route tokens            │
+│   • Standard NCCL AllToAll on multi-node is slow                    │
+│   • Becomes the dominant cost at scale (>16 GPUs)                   │
+│                                                                     │
+│   Perplexity's approach:                                            │
+│   • Custom AllToAll kernel bypassing NCCL                           │
+│   • Direct GPU-to-GPU communication over AWS EFA                    │
+│   • Overlaps communication with expert computation                  │
+│   • Result: ~10× faster AllToAll vs NCCL baseline                   │
+│                                                                     │
+│   Standard NCCL AllToAll:                                           │
+│   ┌─────────┐                              ┌─────────┐             │
+│   │  GPU 0  │──── NCCL (store-and-forward)──│  GPU 8  │             │
+│   │ Node 0  │     through CPU/NIC stack     │ Node 1  │             │
+│   └─────────┘                              └─────────┘             │
+│   Latency: ~100-200 μs per AllToAll                                 │
+│                                                                     │
+│   Perplexity custom kernel:                                         │
+│   ┌─────────┐                              ┌─────────┐             │
+│   │  GPU 0  │──── Direct RDMA over EFA ─────│  GPU 8  │             │
+│   │ Node 0  │     (GPU-initiated, async)    │ Node 1  │             │
+│   └─────────┘                              └─────────┘             │
+│   Latency: ~10-20 μs per AllToAll                                   │
+│                                                                     │
+│   Impact on MoE serving:                                            │
+│   • Enables efficient EP across 64-128 GPUs                         │
+│   • Makes Wide-EP practical at multi-node scale                     │
+│   • Removes communication as the scaling bottleneck                 │
+│   • Critical for models like DeepSeek-V3 (256 experts)              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Counter-Intuitive MoE Scaling: More GPUs = Higher Throughput AND Lower Latency
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│         MOE SCALING: THE OPPOSITE OF DENSE MODELS                  │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   Dense model scaling (TP):                                         │
+│   • More GPUs → lower latency (compute split)                       │
+│   • More GPUs → LOWER throughput (communication overhead)           │
+│   • Classic trade-off: latency vs throughput                        │
+│                                                                     │
+│   MoE with Wide-EP:                                                 │
+│   • More GPUs → lower latency (faster expert execution)             │
+│   • More GPUs → HIGHER throughput (simultaneously!)                 │
+│   • No trade-off — both improve together                            │
+│                                                                     │
+│   Why? The MoE bottleneck is memory bandwidth, not compute:         │
+│                                                                     │
+│   Dense (TP=4 → TP=8):                                              │
+│   ┌────────────────────────────────────────────────────────────┐    │
+│   │ Compute: 2× faster (split across more GPUs)        ✓       │    │
+│   │ Communication: 2× more AllReduce overhead          ✗       │    │
+│   │ Batch capacity: Same (KV cache per GPU unchanged)          │    │
+│   │ Net: Latency ↓, Throughput ↓                               │    │
+│   └────────────────────────────────────────────────────────────┘    │
+│                                                                     │
+│   MoE (EP=8 → Wide-EP=16):                                          │
+│   ┌────────────────────────────────────────────────────────────┐    │
+│   │ Memory BW: 2× per expert (weight reads parallelized) ✓     │    │
+│   │ Communication: AllToAll (fast with custom kernels)   ~     │    │
+│   │ Batch capacity: 2× more VRAM for KV cache           ✓     │    │
+│   │ Net: Latency ↓, Throughput ↑                               │    │
+│   └────────────────────────────────────────────────────────────┘    │
+│                                                                     │
+│   Measured results (Mixtral 8x7B, Anyscale):                        │
+│   ┌─────────────────────────────────────────────────────────────┐   │
+│   │ Config      │ Latency (TTFT) │ Throughput (tok/s) │ GPUs    │   │
+│   │─────────────┼────────────────┼────────────────────┼─────────│   │
+│   │ EP=8        │ 45 ms          │ 2,100              │ 8       │   │
+│   │ Wide-EP=16  │ 28 ms          │ 3,800              │ 16      │   │
+│   │ Wide-EP=32  │ 19 ms          │ 5,200              │ 32      │   │
+│   └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│   Implication: For MoE models, throwing more GPUs at the problem    │
+│   improves BOTH latency and throughput — making the cost/perf       │
+│   curve fundamentally different from dense model deployments.       │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## Choosing Parallelism Strategy
