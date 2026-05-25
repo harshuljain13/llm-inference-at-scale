@@ -16,7 +16,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT">
+  <img src="https://img.shields.io/badge/license-All%20Rights%20Reserved-red.svg" alt="All Rights Reserved">
   <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome">
 </p>
 
@@ -106,7 +106,7 @@ This handbook exists because we needed it and couldn't find it. The knowledge is
 ### Installation
 
 ```bash
-git clone https://github.com/your-org/llm-inference-at-scale.git
+git clone https://github.com/harshuljain13/llm-inference-at-scale.git
 cd llm-inference-at-scale
 
 # Create virtual environment
@@ -273,9 +273,6 @@ llm-inference-at-scale/
 │   ├── 07_operations/            #    Part VIII: Operations
 │   └── utils/                    #    Visualization utilities
 ├── labs/                         # 🧪 Hands-on exercises
-│   ├── lab_01_transformer_forward_pass/
-│   ├── lab_02_vram_calculation/
-│   └── ...
 ├── reference/                    # 📋 Quick references
 │   ├── cheat_sheet.md            #    One-page summary
 │   ├── glossary.md               #    Terminology
@@ -324,18 +321,18 @@ For teams standardizing on LLM serving:
 
 This material has been presented at:
 
-- *Your conference here* — We're actively seeking speaking opportunities
+- *More talks coming — if you'd like this at your conference or meetup, open an issue.*
 
 ### Citation
 
-If you use this material in your work, please cite:
+If you use this material in research or internal documentation, please cite:
 
 ```bibtex
 @misc{llm-inference-at-scale,
   title={LLM Inference at Scale: A Practitioner's Handbook},
-  author={Your Name},
-  year={2026},
-  url={https://github.com/your-org/llm-inference-at-scale}
+  author={Jain, Harshul},
+  year={2025},
+  url={https://github.com/harshuljain13/llm-inference-at-scale}
 }
 ```
 
@@ -347,14 +344,13 @@ If you find this useful, please ⭐ the repo — it helps others discover it.
 
 ## 🤝 Contributing
 
-We welcome contributions! This is a living document and there's always room for improvement.
+Contributions are welcome. This is a living document.
 
 ### Ways to Contribute
 
 - **Fix errors** — Typos, outdated information, incorrect formulas
 - **Improve clarity** — Better explanations, additional examples
 - **Add content** — New chapters, labs, or reference materials
-- **Translate** — Help make this accessible in other languages
 
 ### Process
 
@@ -363,21 +359,37 @@ We welcome contributions! This is a living document and there's always room for 
 3. Make your changes
 4. Submit a pull request
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+> To report errors or suggest corrections, open a GitHub Issue.
 
 ---
 
-## 📄 License
+## 👤 About the Author
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+**Harshul Jain** is a Senior ML Infrastructure Engineer at Audible (Amazon), where he owns the ML Feature Store, a GenAI semantic search platform serving millions of customers, and real-time streaming pipelines at scale. He has been building and operating ML infrastructure in production for 4+ years and mentors 300+ engineers through an eMentoring program.
 
-You are free to use this material for:
-- Personal learning
-- Corporate training
-- Conference presentations
-- Derivative works
+- GitHub: [@harshuljain13](https://github.com/harshuljain13)
 
-Attribution is appreciated but not required.
+---
+
+## ⚠️ Disclaimer
+
+The views, techniques, and opinions expressed in this handbook are solely those of the author and **do not represent the views of Audible, Amazon, or any affiliated organization**. No proprietary, confidential, or internal Amazon/Audible systems, data, or information has been included. All content is based on publicly available research, open-source tooling, and the author's independent experience and analysis.
+
+This handbook is provided for **educational purposes only**. Production infrastructure decisions should be validated against your specific workload, hardware, and organizational constraints. The author makes no guarantees about the accuracy, completeness, or fitness for purpose of any content herein.
+
+---
+
+## 📄 License & Copyright
+
+© 2026 Harshul Jain. All rights reserved.
+
+No part of this work — including the framework, diagrams, models, terminology, chapter structure, or related materials — may be reproduced, distributed, modified, adapted, or used in whole or in part without prior written permission from the author. This includes but is not limited to use in courses, training programs, consulting engagements, publications, presentations, software, or organizational materials.
+
+### Framework
+
+The framework presented in this work is the intellectual property of Harshul Jain. It may not be copied, adapted, taught, commercialized, incorporated into derivative works, or used in any professional, commercial, or organizational context — including consulting, training, software, presentations, publications, or organizational materials — without prior written permission.
+
+> To request permission, open a GitHub Issue or contact via the profile above.
 
 ---
 
