@@ -1,0 +1,7 @@
+torch>=2.0
+numpy
+matplotlib
+aiohttp
+pydantic
+tabulate
+pyyaml
