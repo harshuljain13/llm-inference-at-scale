@@ -1,0 +1,38 @@
+Copyright (c) 2026 Harshul Jain. All rights reserved.
+
+PROPRIETARY LICENSE
+
+No part of this work — including the framework, diagrams, models, terminology,
+chapter structure, code, or related materials — may be reproduced, distributed,
+modified, adapted, or used in whole or in part without prior written permission
+from the author.
+
+This includes but is not limited to use in:
+- Courses and training programs
+- Consulting engagements
+- Publications and presentations
+- Software and derivative works
+- Organizational materials
+
+FRAMEWORK INTELLECTUAL PROPERTY
+
+The framework presented in this work is the intellectual property of Harshul Jain.
+It may not be copied, adapted, taught, commercialized, incorporated into derivative
+works, or used in any professional, commercial, or organizational context without
+prior written permission.
+
+DISCLAIMER
+
+This work is provided for educational purposes only. The author makes no guarantees
+about the accuracy, completeness, or fitness for purpose of any content herein.
+Production infrastructure decisions should be validated against your specific
+workload, hardware, and organizational constraints.
+
+The views, techniques, and opinions expressed in this work are solely those of the
+author and do not represent the views of any affiliated organization.
+
+To request permission, open a GitHub Issue at:
+https://github.com/harshuljain13/llm-inference-at-scale
+
+or contact via the author's GitHub profile:
+https://github.com/harshuljain13
