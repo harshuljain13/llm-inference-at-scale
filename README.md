@@ -48,6 +48,12 @@ This handbook exists because we needed it and couldn't find it. The knowledge is
 
 ---
 
+> 📬 **Follow the build** — New chapters, explained in plain English with production context.
+> Subscribe to [The Engineer's Digest](https://harshuljain.substack.com) to get notified
+> when new content drops. **[Subscribe free →](https://harshuljain.substack.com)**
+
+---
+
 ## 🎯 What You'll Learn
 
 <table>
@@ -368,6 +374,7 @@ Contributions are welcome. This is a living document.
 **Harshul Jain** is a Senior ML Infrastructure Engineer at Audible (Amazon), where he owns the ML Feature Store, a GenAI semantic search platform serving millions of customers, and real-time streaming pipelines at scale. He has been building and operating ML infrastructure in production for 4+ years and mentors 300+ engineers through an eMentoring program.
 
 - GitHub: [@harshuljain13](https://github.com/harshuljain13)
+- Newsletter: [The Engineer's Digest](https://harshuljain.substack.com) — LLM inference, deeply explained
 
 ---
 
@@ -401,6 +408,10 @@ This handbook builds on the work of many researchers and engineers:
 - The [SGLang](https://github.com/sgl-project/sglang) team for RadixAttention
 - Tri Dao for [FlashAttention](https://github.com/Dao-AILab/flash-attention)
 - The authors of foundational papers: Attention Is All You Need, GQA, Medusa, EAGLE, and many others
+
+---
+
+📬 **Stay updated** — [Subscribe to The Engineer's Digest](https://harshuljain.substack.com) for chapter releases and build-in-public updates.
 
 ---
 
