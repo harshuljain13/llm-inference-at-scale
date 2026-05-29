@@ -52,6 +52,8 @@ This handbook exists because we needed it and couldn't find it. The knowledge is
 > Subscribe to [The Engineer's Digest](https://harshuljain.substack.com) to get notified
 > when new content drops. **[Subscribe free →](https://harshuljain.substack.com)**
 
+💬 [Join the discussion](https://github.com/harshuljain13/llm-inference-at-scale/discussions) 
+— questions, feedback, and corrections welcome
 ---
 
 ## 🎯 What You'll Learn
