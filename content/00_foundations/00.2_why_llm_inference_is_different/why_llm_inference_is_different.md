@@ -1,6 +1,6 @@
-# Module 0.1: Why LLM Inference is Different
+# Module 0.2: Why LLM Inference is Different
 
-> The first thing to understand about LLM inference is that almost everything you know about ML inference is wrong—or at least, doesn't apply.
+> You now know what a transformer looks like inside (Module 0.0) and how inference works — tokenization, prefill, decode, KV cache (Module 0.1). This module answers: **why is all of this so expensive?**
 
 ---
 
@@ -54,7 +54,7 @@ This isn't a limitation to be engineered away—it's how autoregressive language
 
 ### You Read the Entire Model for Every Token
 
-Here's the insight that changes how you think about LLM inference:
+In traditional ML, you load the model once and run millions of requests through it — the weights stay in GPU memory and get reused efficiently. With LLMs, something counterintuitive happens: even though the weights never change, the GPU must physically read them from memory on every single token generation. Here's why that's devastating:
 
 ```
 Llama 3.1 8B generating 100 tokens:
@@ -75,7 +75,7 @@ Neural networks don't "remember" their weights between operations. Every matrix 
 
 ### The Memory Bandwidth Wall
 
-This leads to a hard physical limit:
+If the GPU must read 16 GB of weights for every token, the speed of generation is fundamentally limited by how fast the GPU can read from its own memory. This isn't a software bottleneck you can optimize away — it's a hardware constraint called the memory bandwidth wall:
 
 ```
 A100 memory bandwidth: 2 TB/s
@@ -94,7 +94,7 @@ Maximum decode speed = 1 token / 8 ms = 125 tokens/second
 
 ## The Two Phases: Prefill and Decode
 
-Every LLM request goes through two distinct phases with completely different characteristics:
+Not all parts of inference are equally slow. When you send a prompt, the model first processes all your input tokens in parallel (fast), then generates the response one token at a time (slow). These two phases have completely different performance characteristics, and understanding this split is the key to every optimization in the rest of this book:
 
 | Phase | What Happens | Bottleneck | When It Runs |
 |-------|--------------|------------|--------------|
@@ -103,13 +103,13 @@ Every LLM request goes through two distinct phases with completely different cha
 
 ### Prefill: The Compute-Bound Phase
 
-During prefill, all prompt tokens are processed in parallel through the model. This is where the KV cache is built.
+During prefill, all prompt tokens are processed in parallel through the model. This is the "reading comprehension" step — the model digests your entire input and builds the KV cache. Because many tokens are processed simultaneously, the GPU's compute units stay busy.
 
 **Why prefill is compute-bound:** The GPU sees large matrices (e.g., [1000, 4096] × [4096, 4096] for a 1000-token prompt). There's enough parallel work to keep the compute units busy. The bottleneck is how many FLOPs the GPU can execute per second.
 
 ### Decode: The Memory-Bound Phase
 
-During decode, tokens are generated one at a time. Each token requires reading the entire model from memory.
+During decode, the model generates one token at a time. Each token requires reading the full model from memory, but produces just a single output. This is the bottleneck that dominates most real-world LLM serving costs.
 
 **Why decode is memory-bound:** The GPU sees tiny matrices (e.g., [1, 4096] × [4096, 4096]). There's not enough parallel work to keep the compute units busy. The GPU spends most of its time waiting for data to arrive from memory.
 
@@ -121,7 +121,7 @@ During decode, tokens are generated one at a time. Each token requires reading t
 │   What the GPU CAN do:     312 TFLOPS (312 trillion ops/second)     │
 │   What the GPU DOES do:    ~16 GFLOPS (limited by memory bandwidth) │
 │                                                                     │
-│   GPU Utilization during decode: 16 / 312,000 ≈ 0.005%              │
+│   GPU Utilization during decode: ~2 TFLOP/s sustained vs 312 TFLOP/s peak ≈ 0.6%  │
 │                                                                     │
 │   The GPU is 99.995% IDLE during decode!                            │
 │                                                                     │
@@ -206,7 +206,7 @@ Total: 850ms
 
 ## The Roofline Model
 
-The roofline model visualizes why prefill and decode behave so differently. It shows the relationship between computational intensity and achievable performance.
+The roofline model is a visual tool that explains why prefill and decode behave so differently on the same hardware. It plots achievable performance against computational intensity (how much math you do per byte of memory read). Workloads that read a lot of data but do little math sit on the left (memory-bound); workloads that do heavy math on small data sit on the right (compute-bound).
 
 ![Roofline Model for LLM Inference on A100](images/roofline_model_a100.png)
 *The roofline model shows why prefill and decode have fundamentally different bottlenecks. Decode sits deep in the memory-bound region, while prefill operates in the compute-bound region.*
@@ -235,15 +235,12 @@ This is why **batching helps decode**—processing multiple requests together in
 
 ## What's Next
 
-Now that you understand *why* LLM inference is different, the next module dives into *how* it actually works at the byte level:
+You now have the complete foundation: what the machine is (0.0), how it runs (0.1), and why it's hard (0.2). The rest of this book is about solving these problems:
 
-- **Module 0.2: Transformer Inference Mechanics** — Detailed walkthrough of attention, KV cache, GQA, and memory access patterns with concrete numbers
-
-Then we'll cover the hardware and optimization techniques:
-
-- **Module 1: GPU Fundamentals** — Memory hierarchy, roofline analysis, FlashAttention
-- **Module 2: Attention and KV Cache** — PagedAttention, cache compression, memory management
-- **Module 3: Optimization Techniques** — Quantization, continuous batching, speculative decoding
+- **Chapter 01: GPU Fundamentals** — Memory hierarchy, roofline analysis, and hardware selection
+- **Chapter 02: Attention and KV Cache** — PagedAttention, cache compression, memory management
+- **Chapter 03: Optimization** — Quantization, continuous batching, speculative decoding
+- **Chapters 04-07** — Engines, scaling, serving, and operations
 
 ---
 

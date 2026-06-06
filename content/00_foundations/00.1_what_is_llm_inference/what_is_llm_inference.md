@@ -1,6 +1,6 @@
-# Module 0.0: What is LLM Inference?
+# Module 0.1: What is LLM Inference?
 
-> Before we dive into optimization techniques, let's understand what actually happens when you send a prompt to an LLM and get a response back.
+> Now that you understand transformer architecture (Module 0.0), let's see what happens when you actually send a prompt to an LLM and get a response back.
 
 ---
 
@@ -17,12 +17,17 @@ By the end of this module, you will:
 
 ## The Big Picture
 
-When you send a message to ChatGPT or call an LLM API, a lot happens behind the scenes. Let's trace through the complete journey of a request.
+**Inference** is the act of using a trained model to produce outputs — in the case of an LLM, generating text. Unlike training (which takes weeks on thousands of GPUs and happens once), inference happens every time someone sends a prompt. It's the "using" phase — the model's weights are frozen, and it's just reading inputs and writing outputs.
+
+What makes LLM inference unique compared to, say, image classification:
+- **It's iterative** — the model generates one token at a time, feeding each output back as input for the next step
+- **It's variable-length** — a response could be 5 tokens or 5,000, and you don't know in advance
+- **It has two distinct phases** — processing your prompt (fast, parallel) and generating the response (slow, sequential)
+
+Let's trace through the complete journey of a request — from the moment you hit "send" to the moment the response appears.
 
 ![LLM Inference End-to-End Flow](images/llm_inference_end_to_end.png)
 *The complete LLM inference pipeline: tokenization, prefill, decode loop, and detokenization.*
-
-Let's walk through each stage.
 
 ---
 
@@ -63,23 +68,53 @@ Once tokenized, the prompt goes to the GPU for the **prefill** phase. This is wh
 
 **What is the KV Cache?**
 
-During prefill, the model computes intermediate values called Keys (K) and Values (V) for each token. These are stored in the **KV cache** so they don't need to be recomputed during decode.
+During prefill, the model computes intermediate values called Keys (K) and Values (V) for each token at every layer. These are stored in the **KV cache** so they don't need to be recomputed during decode.
 
 Think of it like this: the model "takes notes" while reading your prompt, and refers back to these notes when generating each output token.
+
+Recall from Module 0.0 that Llama 3.1 8B has 8 KV heads × 128 dimensions per head across 32 layers. The KV cache stores both K and V, so:
+
+```
+KV cache per token = 2 (K+V) × 32 layers × 8 heads × 128 dims × 2 bytes = 128 KB
+```
+
+For a 4096-token conversation: 128 KB × 4096 = **512 MB** of GPU memory just for one user's context. This linear growth with sequence length is why KV cache management is a central challenge in LLM serving (explored in Chapter 02).
 
 ---
 
 ## Stage 3: Decode (Generating the Response)
 
-After prefill, the model enters the **decode** phase. This is where it generates the response, one token at a time.
+After prefill, the model enters the **decode** phase. This is where it generates the response, one token at a time. This process is **autoregressive** — each generated token becomes input for the next step.
 
 ![Decode Phase](images/decode.png)
 *During decode, tokens are generated one at a time. Each step reads from the KV cache and appends the new token's K,V to it.*
 
+**The autoregressive loop:**
+
+```
+Step 1: Model outputs logits → sample → "The"
+Step 2: Feed "The" back in → model outputs logits → sample → " capital"
+Step 3: Feed " capital" back in → ...
+...until stop condition is met.
+```
+
+Each step produces a probability distribution over all 128K possible next tokens. The model doesn't "choose" a token — a **sampling strategy** does:
+
+| Strategy | How it works | When to use |
+|----------|-------------|-------------|
+| **Greedy** | Always pick highest probability | Deterministic, but repetitive |
+| **Top-k** | Sample from the top k candidates | Good general default (k=50) |
+| **Top-p (nucleus)** | Sample from smallest set whose probabilities sum to p | Adaptive — fewer choices when model is confident |
+| **Temperature** | Scale logits before softmax (T<1 = sharper, T>1 = flatter) | Controls creativity vs. precision |
+
+**When does generation stop?**
+- The model generates an **EOS (end-of-sequence) token** — a special token that means "I'm done"
+- The system hits a **max_tokens limit** (e.g., 4096) — a safety cutoff to prevent runaway generation
+- The application applies custom stop sequences (e.g., stop at `"\n\n"`)
 
 **Why is decode slow?**
 
-Each decode step requires reading the entire model from memory, but only generates one token. The GPU spends most of its time waiting for data, not computing. We'll explore this in detail in Module 0.1.
+Each decode step requires reading the entire model from memory, but only generates one token. The GPU spends most of its time waiting for data, not computing. We'll explore this in detail in Module 0.2.
 
 ---
 
@@ -174,5 +209,5 @@ Understanding this split is essential for optimizing LLM inference, which we'll 
 
 ## What's Next
 
-- **Module 0.1: Why LLM Inference is Different** — Deep dive into why decode is slow and how it differs from traditional ML
-- **Module 0.2: Transformer Inference Mechanics** — Byte-level details of attention, KV cache, and memory access patterns
+- **Module 0.2: Why LLM Inference is Different** — Deep dive into why decode is slow, the bandwidth wall, and how it differs from traditional ML
+- **Chapter 01: GPU Fundamentals** — Memory hierarchy, roofline model, and hardware selection

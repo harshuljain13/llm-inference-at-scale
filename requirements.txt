@@ -5,3 +5,5 @@ aiohttp
 pydantic
 tabulate
 pyyaml
+transformers
+huggingface_hub
