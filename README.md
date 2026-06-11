@@ -129,7 +129,7 @@ pip install -r requirements.txt
 
 ```bash
 # Open the first chapter
-open content/00_foundations/00.0_what_is_llm_inference/what_is_llm_inference.md
+open content/00_foundations/00.0_transformer_anatomy_and_memory/transformer_anatomy_and_memory.md
 ```
 
 Or browse the [Table of Contents](#-table-of-contents) below.
@@ -142,9 +142,9 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 
 | Chapter | Title | Description |
 |:-------:|-------|-------------|
-| 0.0 | [What is LLM Inference?](content/00_foundations/00.0_what_is_llm_inference/what_is_llm_inference.md) | The four stages: tokenization → prefill → decode → detokenization. Key metrics: TTFT, ITL, throughput. |
-| 0.1 | [Why LLM Inference is Different](content/00_foundations/00.1_why_llm_inference_is_different/why_llm_inference_is_different.md) | The 100x cost gap explained. Memory bandwidth wall. Why traditional ML rules don't apply. |
-| 0.2 | [Transformer Inference Mechanics](content/00_foundations/00.2_transformer_inference_basics/transformer_inference_basics.md) | Byte-level attention walkthrough. KV cache math. GQA/MQA tradeoffs with real numbers. |
+| 0.0 | [Transformer Anatomy & Memory](content/00_foundations/00.0_transformer_anatomy_and_memory/transformer_anatomy_and_memory.md) | Transformer architecture, building blocks, and how model parameters are organized into layers. |
+| 0.1 | [What is LLM Inference?](content/00_foundations/00.1_what_is_llm_inference/what_is_llm_inference.md) | The four stages: tokenization → prefill → decode → detokenization. Key metrics: TTFT, ITL, throughput. |
+| 0.2 | [Why LLM Inference is Different](content/00_foundations/00.2_why_llm_inference_is_different/why_llm_inference_is_different.md) | The 100x cost gap explained. Memory bandwidth wall. Why traditional ML rules don't apply. |
 
 ### Part II: GPU Fundamentals
 
@@ -298,8 +298,8 @@ llm-inference-at-scale/
 
 For engineers who need to deploy an LLM this week:
 
-1. [0.0 What is LLM Inference?](content/00_foundations/00.0_what_is_llm_inference/what_is_llm_inference.md) — 15 min
-2. [0.1 Why LLM Inference is Different](content/00_foundations/00.1_why_llm_inference_is_different/why_llm_inference_is_different.md) — 20 min
+1. [0.0 Transformer Anatomy & Memory](content/00_foundations/00.0_transformer_anatomy_and_memory/transformer_anatomy_and_memory.md) — 15 min
+2. [0.1 What is LLM Inference?](content/00_foundations/00.1_what_is_llm_inference/what_is_llm_inference.md) — 20 min
 3. [3.1 Quantization](content/03_optimization/03.1_quantization/quantization.md) — 20 min
 4. [4.1 vLLM](content/04_engines/04.1_vllm/vllm.md) — 30 min
 5. [Lab 04: vLLM Deployment](labs/lab_04_vllm_deployment/) — 45 min
