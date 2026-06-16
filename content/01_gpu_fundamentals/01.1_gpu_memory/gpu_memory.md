@@ -26,7 +26,7 @@ This is wrong. For LLM decode, 30% utilization might mean you're already at the 
 
 The reason: **LLM decode is memory-bandwidth-bound, not compute-bound.** The GPU's compute units are idle because they're waiting for data to arrive from memory. Adding more compute won't help—you need more memory bandwidth.
 
-**Insight #1: GPU utilization measures compute utilization, not memory bandwidth utilization.** For memory-bound workloads, low GPU utilization is expected and correct. The metric you should watch is memory bandwidth utilization—but NVIDIA doesn't expose this directly in nvidia-smi.
+This reveals a critical misunderstanding in how engineers interpret metrics: GPU utilization measures compute utilization, not memory bandwidth utilization. For memory-bound workloads, low GPU utilization is expected and correct. The metric you should watch is memory bandwidth utilization, but NVIDIA doesn't expose this directly in nvidia-smi.
 
 ---
 
@@ -41,31 +41,11 @@ Every workload hits one of two ceilings:
 1. **Compute ceiling**: How fast the GPU can do math (FLOPS)
 2. **Memory ceiling**: How fast the GPU can read/write data (bytes/second)
 
-```
-Performance
-(TFLOPS)
-    │
-312 ┤─────────────────────────────────────── Compute Ceiling
-    │                              ╱         (A100: 312 TFLOPS)
-    │                            ╱
-    │                          ╱
-    │                        ╱   ← Ridge Point
-    │                      ╱       (156 FLOPs/byte)
-    │                    ╱
-    │                  ╱   Memory Ceiling
-    │                ╱     (slope = bandwidth)
-    │              ╱
-    │            ╱
-    │          ╱
-    │        ╱
-    │      ╱
-    │    ╱
-    │  ╱
-    │╱
-    └──────────────────────────────────────────────────────────
-         1        10       100      156     1000
-                  Arithmetic Intensity (FLOPs/byte)
-```
+The roofline model plots these two ceilings on a log-log chart. Every workload lands somewhere on this chart based on its arithmetic intensity (how much math it does per byte of memory it reads). Workloads to the left of the "ridge point" are memory-bound; workloads to the right are compute-bound.
+
+![Roofline Model](images/roofline_a100.png)
+
+The critical insight for LLM inference: **decode (batch=1) sits at arithmetic intensity ~1**, deep in the memory-bound region. Even with the world's fastest GPU, decode speed is limited by how fast you can read weights from HBM. Prefill, by contrast, sits in the compute-bound region because it processes many tokens in parallel.
 
 ### The Ridge Point: Where Everything Changes
 
@@ -85,7 +65,7 @@ H100 SXM:
   Ridge Point: 990 TFLOPS / 3.35 TB/s = 296 FLOPs/byte
 ```
 
-**Insight #2: The ridge point tells you the minimum arithmetic intensity needed to be compute-bound.** If your workload does fewer than 156 FLOPs per byte of memory accessed on A100, you're memory-bound. Period.
+The ridge point tells you the minimum arithmetic intensity needed to be compute-bound. If your workload does fewer than 156 FLOPs per byte of memory accessed on A100, you're memory-bound. Period.
 
 ### Arithmetic Intensity: The Key Metric
 
@@ -137,7 +117,7 @@ print(f"Ratio: {intensity/ridge_point_a100:.1%}")
 # Decode is at 0.6% of the ridge point!
 ```
 
-**Insight #3: LLM decode has arithmetic intensity ~1 FLOP/byte. The ridge point is ~150 FLOPs/byte. Decode is 150× below the ridge point.** This is why decode is so severely memory-bound—you're nowhere near utilizing the GPU's compute capacity.
+The numbers make the situation stark: LLM decode has arithmetic intensity of roughly 1 FLOP/byte, while the ridge point sits at approximately 150 FLOPs/byte. Decode operates 150× below the ridge point. This is why decode is so severely memory-bound; you're nowhere near utilizing the GPU's compute capacity.
 
 ### Prefill vs Decode on the Roofline
 
@@ -167,7 +147,7 @@ Performance
                   Arithmetic Intensity (FLOPs/byte)
 ```
 
-**Insight #4: Prefill and decode live in completely different regions of the roofline.** Prefill (with long sequences) is compute-bound. Decode is memory-bound. This is why they need different optimization strategies—and increasingly, different hardware.
+What the chart makes visually obvious is that prefill and decode live in completely different regions of the roofline. Prefill (with long sequences) is compute-bound. Decode is memory-bound. This is why they need different optimization strategies, and increasingly, different hardware.
 
 ### Batching Moves You Up the Roofline
 
@@ -207,7 +187,7 @@ Performance
          1        10       100      156     1000
 ```
 
-**Insight #5: You need batch size ~156 to become compute-bound on A100.** But here's the catch: KV cache grows with batch size. At batch=156 with 4K context, you need 156 × 512 MB = 80 GB just for KV cache. That's the entire A100 80GB!
+Following this progression, you need batch size ~156 to become compute-bound on A100. But here's the catch: KV cache grows with batch size. At batch=156 with 4K context, you need 156 × 512 MB = 80 GB just for KV cache. That's the entire A100 80GB!
 
 **This is the fundamental constraint of LLM inference: you can never batch enough to become compute-bound because KV cache eats all your memory first.**
 
@@ -215,7 +195,9 @@ Performance
 
 ## GPU Memory Hierarchy: Why It Matters
 
-Understanding the memory hierarchy explains why FlashAttention works and why naive attention implementations are slow.
+Understanding the memory hierarchy explains why FlashAttention works and why naive attention implementations are slow. The GPU has multiple levels of memory, each trading capacity for speed. The bandwidth drops by orders of magnitude as you move from registers to HBM to CPU memory:
+
+![Memory Hierarchy](images/memory_hierarchy.png)
 
 ### The Hierarchy
 
@@ -236,7 +218,7 @@ Understanding the memory hierarchy explains why FlashAttention works and why nai
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #6: There's a 10× bandwidth gap between L2 cache and HBM.** If your working set fits in L2 (50 MB), you get 5 TB/s. If it spills to HBM, you get 2 TB/s. This 2.5× difference is why kernel optimization matters.
+The critical takeaway from this hierarchy is the 10× bandwidth gap between L2 cache and HBM. If your working set fits in L2 (50 MB), you get 5 TB/s. If it spills to HBM, you drop to 2 TB/s. This 2.5× difference is why kernel optimization matters so much.
 
 ### Why FlashAttention Works: An L2 Cache Story
 
@@ -273,7 +255,7 @@ for q_tile in tiles(Q):           # Iterate over query tiles
         update_output_accumulator(partial_scores, v_tile)
 ```
 
-**Insight #7: FlashAttention is 2-4× faster not because it does less compute, but because it does the same compute with 10× less HBM traffic.** It trades extra compute (recomputing softmax normalization) for reduced memory bandwidth. This is a good trade because we're memory-bound.
+This is the core of why FlashAttention achieves 2-4× speedup: not because it does less compute, but because it does the same compute with 10× less HBM traffic. It trades extra compute (recomputing softmax normalization) for reduced memory bandwidth. This is a good trade because we're memory-bound.
 
 ### The Numbers That Prove It
 
@@ -294,11 +276,15 @@ FlashAttention:
 Reduction: 4.1 GB → 132 MB = 31× less HBM traffic!
 ```
 
-**Insight #8: FlashAttention reduces HBM traffic by 30×, which translates to 2-4× speedup.** The speedup is less than 30× because there's overhead from the tiling and online softmax computation. But for memory-bound attention, this is a massive win.
+The numbers confirm the design: FlashAttention reduces HBM traffic by 30×, which translates to a 2-4× speedup. The speedup is less than 30× because there's overhead from the tiling and online softmax computation. But for memory-bound attention, this is a massive win.
 
 ---
 
 ## VRAM Budgeting: The Real Formula
+
+The chart below shows exactly how VRAM is consumed for different model configurations. Notice how KV cache (red) becomes the dominant consumer at high batch sizes, and how quantization (INT4) dramatically reduces the weights component but doesn't touch the KV cache.
+
+![VRAM Budget](images/vram_budget.png)
 
 Everyone knows the basic formula:
 
@@ -330,7 +316,7 @@ def model_weight_bytes(params_billions: float, dtype: str) -> int:
 # Llama 70B INT4: 70B × 0.5 = 35 GB
 ```
 
-**Insight #9: INT4 quantization gives you 4× memory reduction, but the KV cache is usually still FP16.** A "4-bit model" doesn't mean 4× less total VRAM—the KV cache often dominates at high batch sizes.
+A subtle but important point: INT4 quantization gives you 4× memory reduction for weights, but the KV cache is usually still FP16. A "4-bit model" doesn't mean 4× less total VRAM because the KV cache often dominates at high batch sizes.
 
 ### KV Cache: Where the Formula Gets Tricky
 
@@ -373,7 +359,7 @@ allocated_tokens = ((actual_seq + block_size - 1) // block_size) * block_size
 # Overhead: 15/17 = 88%!
 ```
 
-**Insight #10: PagedAttention overhead is negligible for long sequences but can nearly double memory for short sequences.** If you're serving many short requests, this matters.
+The practical consequence is that PagedAttention overhead is negligible for long sequences but can nearly double memory usage for short sequences. If you're serving many short requests, this matters.
 
 **Trap #2: KV cache is FP16 even with INT4 weights**
 
@@ -425,7 +411,7 @@ mlp_intermediate = batch * seq * intermediate * 2  # 117 MB (14336 intermediate)
 # But with careful memory management, only ~50-100 MB sustained
 ```
 
-**Insight #11: Activation memory is roughly 5-10% of model size for inference.** Training needs much more (for gradients), but inference can reuse buffers across layers.
+In practice, activation memory is roughly 5-10% of model size for inference. Training needs much more (for gradients), but inference can reuse buffers across layers.
 
 ### The Complete VRAM Calculator
 
@@ -520,7 +506,7 @@ Llama 70B, batch=8, seq=4K, INT4:
   Total: 50.55 GB
 ```
 
-**Insight #12: At high batch sizes, KV cache dominates VRAM—even more than model weights.** For Llama 8B at batch=32, KV cache is larger than the model itself. This is why batch size is limited by memory, not compute.
+The pattern is clear from these numbers: at high batch sizes, KV cache dominates VRAM, even more than model weights. For Llama 8B at batch=32, KV cache is larger than the model itself. This is why batch size is limited by memory, not compute.
 
 ---
 
@@ -529,6 +515,8 @@ Llama 70B, batch=8, seq=4K, INT4:
 Most people select GPU instances by VRAM. This is wrong for LLM inference.
 
 **The right approach: Select by memory bandwidth first, then verify VRAM is sufficient.**
+
+![GPU Bandwidth Comparison](images/gpu_bandwidth_comparison.png)
 
 ### The Instance Landscape
 
@@ -559,7 +547,7 @@ Most people select GPU instances by VRAM. This is wrong for LLM inference.
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #13: Inferentia2 has the best cost per bandwidth.** At $1.32 per GB/s per hour, inf2.24xlarge is 2× more cost-efficient than g5 instances for memory-bound workloads. The catch: you need to compile your model with Neuron SDK.
+Looking at the cost-efficiency column, Inferentia2 has the best cost per bandwidth. At $1.32 per GB/s per hour, inf2.24xlarge is 2× more cost-efficient than g5 instances for memory-bound workloads. The catch: you need to compile your model with Neuron SDK.
 
 ### Theoretical Maximum Throughput
 
@@ -634,7 +622,7 @@ Llama 70B INT4 (35 GB):
   ...
 ```
 
-**Insight #14: INT4 quantization gives you 4× higher theoretical throughput because you read 4× fewer bytes.** This is why quantization is so powerful for inference—it directly attacks the memory bandwidth bottleneck.
+The throughput numbers confirm a principle from the roofline analysis: INT4 quantization gives you 4× higher theoretical throughput because you read 4× fewer bytes. This is why quantization is so powerful for inference; it directly attacks the memory bandwidth bottleneck.
 
 ### Instance Selection Decision Framework
 
@@ -747,7 +735,7 @@ Ridge point: 153 FLOPs/byte
 Still memory-bound: True
 ```
 
-**Insight #15: Even at maximum batch size, LLM decode is still memory-bound.** At batch=88 (the max that fits), arithmetic intensity is 22 FLOPs/byte—still 7× below the ridge point. You literally cannot batch enough to become compute-bound because KV cache fills memory first.
+The calculation proves the fundamental constraint: even at maximum batch size, LLM decode is still memory-bound. At batch=88 (the max that fits), arithmetic intensity is 22 FLOPs/byte, still 7× below the ridge point. You literally cannot batch enough to become compute-bound because KV cache fills memory first.
 
 ### The Fundamental Constraint Visualized
 
@@ -802,7 +790,7 @@ bandwidth_utilization = actual_tps / theoretical_max_tps
 print(f"Bandwidth utilization: {bandwidth_utilization:.1%}")  # ~75%
 ```
 
-**Insight #16: 75% bandwidth utilization with 30% GPU utilization is excellent for decode.** The GPU utilization metric is misleading—you're actually close to the hardware limit.
+To put this concretely: 75% bandwidth utilization with 30% GPU utilization is excellent for decode. The GPU utilization metric is misleading; you're actually close to the hardware limit.
 
 ### 2. Quantization is a Bandwidth Optimization
 
