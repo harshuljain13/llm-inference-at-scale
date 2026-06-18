@@ -1,4 +1,4 @@
-# Module 14: MoE Inference & Distillation for Serving
+# 6.3 Distillation for Serving
 
 > Understanding when Mixture-of-Experts wins, when it loses, and how distillation unlocks serving efficiency
 

@@ -1,4 +1,4 @@
-# Module 8: AWS Deep Dive
+# 7.3 SageMaker
 
 > Deploying LLM inference on AWS: EC2, SageMaker, Inferentia2, and Bedrock
 

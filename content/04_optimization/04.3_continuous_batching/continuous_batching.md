@@ -1,4 +1,4 @@
-# Module 3: Optimization Techniques
+# 4.3 Continuous Batching
 
 > Every optimization in LLM inference attacks the same fundamental problem: you're reading 16 GB of weights to generate one token. The question is always: how do we read fewer bytes, or get more tokens per byte read?
 
@@ -504,7 +504,7 @@ Static batching waits for a batch to fill, processes it, then waits for the next
 
 ### Continuous Batching: Iteration-Level Scheduling
 
-Continuous batching makes scheduling decisions at each decode step:
+Continuous batching, first introduced as "iteration-level scheduling" by Yu et al. in the ORCA system (Yu et al., "ORCA: A Distributed Serving System for Transformer-Based Generative Models," OSDI 2022), makes scheduling decisions at each decode step rather than waiting for an entire batch to complete. ORCA's key insight was that requests in a batch finish at different times, and the scheduler should operate at the granularity of individual decode iterations, not entire sequences:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -965,4 +965,4 @@ In Lab 3, you'll compare quantization methods hands-on: measure throughput, late
 4. Leviathan et al. "Fast Inference from Transformers via Speculative Decoding" (2022)
 5. Cai et al. "Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads" (2024)
 6. Li et al. "EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty" (2024)
-7. Yu et al. "Orca: A Distributed Serving System for Transformer-Based Generative Models" (2022)
+7. Yu et al. "ORCA: A Distributed Serving System for Transformer-Based Generative Models" (OSDI 2022) — introduced iteration-level scheduling (continuous batching)

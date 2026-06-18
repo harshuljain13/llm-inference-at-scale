@@ -1,4 +1,4 @@
-# Module 12: Advanced Speculative Decoding
+# 4.4 Advanced Speculative Decoding
 
 > Speculative decoding has evolved from a clever trick into a family of sophisticated techniques. Gen 1 proved the concept. Gen 2 eliminated the draft model. Gen 3 parallelizes everything, adapts on the fly, and exploits heterogeneous hardware. This module takes you from understanding the evolution to deploying the right variant in production.
 

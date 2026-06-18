@@ -1,4 +1,4 @@
-# Module 3: Optimization Techniques
+# 4.4 Speculative Decoding
 
 > Every optimization in LLM inference attacks the same fundamental problem: you're reading 16 GB of weights to generate one token. The question is always: how do we read fewer bytes, or get more tokens per byte read?
 
@@ -15,6 +15,9 @@ By the end of this module, you will:
 - Make informed optimization decisions based on your specific workload characteristics
 
 ---
+
+
+![Speculative Decoding Speedup](images/speculative_speedup.png)
 
 ## The Optimization Landscape
 

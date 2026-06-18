@@ -1,4 +1,4 @@
-# Module 10: Edge Deployment (Optional)
+# 8.3 Edge Deployment
 
 > Running LLMs on consumer hardware: llama.cpp, GGUF, and Apple Silicon
 

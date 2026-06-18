@@ -1,4 +1,4 @@
-# Module 3: Optimization Techniques
+# 3.1 PagedAttention
 
 > Every optimization in LLM inference attacks the same fundamental problem: you're reading 16 GB of weights to generate one token. The question is always: how do we read fewer bytes, or get more tokens per byte read?
 

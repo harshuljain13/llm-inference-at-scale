@@ -1,1064 +1,705 @@
-# Module 4: Inference Engines Deep Dive
+# SGLang: A Programming Language for Structured LLM Inference
 
-> The difference between inference engines isn't just performance—it's architecture. vLLM, SGLang, and TensorRT-LLM make fundamentally different tradeoffs between flexibility, performance, and complexity. Understanding these tradeoffs lets you pick the right tool and tune it correctly.
+## Why Another Serving Engine?
 
----
+vLLM solved the memory problem. TensorRT-LLM solved the kernel problem. But neither solved the *programming* problem: how do you express complex generation patterns (constrained JSON output, multi-step reasoning chains, parallel tool calls) without fighting the serving layer at every step?
 
-## Learning Objectives
+SGLang answers this question by treating LLM inference as a programmable computation, not just a request/response API. Built at UC Berkeley by Lianmin Zheng (co-creator of vLLM, Vicuna, and LMSYS Chatbot Arena), SGLang combines two innovations that make it fundamentally different from other serving engines:
 
-By the end of this module, you will:
+1. **RadixAttention**: a tree-based KV cache that shares prefixes across arbitrary request patterns, not just sequential conversations.
+2. **Native structured generation**: constrained decoding (JSON schemas, regex grammars) integrated at the scheduling layer, not bolted on as post-processing.
 
-- Understand vLLM's internal architecture: how the scheduler, block manager, and workers coordinate
-- Explain why SGLang's RadixAttention outperforms vLLM for certain workloads (and when it doesn't)
-- Know exactly what TensorRT-LLM compilation does and why it's worth the complexity
-- Make informed engine selection decisions based on your specific workload characteristics
-- Tune the 6 critical vLLM knobs with understanding, not guesswork
+The result: 5-10x throughput improvement on structured output workloads and 2-3x improvement on prefix-heavy workloads like RAG and multi-turn chat. These are not synthetic benchmarks; they reflect the workloads that dominate production inference today: agents calling tools, APIs returning JSON, and chatbots sharing long system prompts across thousands of concurrent users.
 
----
-
-## The Engine Landscape
-
-Before diving into internals, let's understand what each engine optimizes for:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    ENGINE DESIGN PHILOSOPHIES                       │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   vLLM: "Make the common case fast with minimal setup"              │
-│   ─────────────────────────────────────────────────────────────    │
-│   • PagedAttention for memory efficiency                            │
-│   • Continuous batching for throughput                              │
-│   • Python scheduler, CUDA kernels for hot paths                    │
-│   • Philosophy: 80% of optimal performance with 20% of effort       │
-│                                                                     │
-│   SGLang: "Optimize for LLM programs, not just single calls"        │
-│   ─────────────────────────────────────────────────────────────    │
-│   • RadixAttention for prefix sharing across requests               │
-│   • Native structured output with constrained decoding              │
-│   • Compiler for multi-step LLM programs                            │
-│   • Philosophy: Maximize reuse across related requests              │
-│                                                                     │
-│   TensorRT-LLM: "Maximum performance, pay the compilation cost"     │
-│   ─────────────────────────────────────────────────────────────    │
-│   • Ahead-of-time compilation to TensorRT engines                   │
-│   • Kernel fusion, quantization, graph optimization                 │
-│   • C++ runtime with minimal Python overhead                        │
-│   • Philosophy: Squeeze every FLOP, accept complexity               │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-\*\*Insight #1: Engine choice is a tradeoff between iteration speed and rhare structure.
+From Module 03.5, you know prefix caching avoids redundant prefill computation by reusing KV cache entries for shared prompt prefixes. SGLang takes this further with RadixAttention: a tree-based cache that shares prefixes across ANY request pattern, not just the linear prefix chains that hash-based approaches handle. Where vLLM's Automatic Prefix Caching (APC) matches exact hash blocks, RadixAttention matches the longest common prefix in O(log n) time across a tree of all active and recently evicted sequences.
 
 ---
 
-## vLLM Architecture: The Deep Dive
+## RadixAttention: Tree-Based KV Cache Sharing
 
-### The Request Lifecycle
+### The Limitation of Hash-Based Prefix Caching
 
-Let's trace exactly what happens when a request hits vLLM:
-
-**Insight #1: Engine choice is a tradeoff between iteration speed and runtime performance.** vLLM lets you change models in seconds. TensorRT-LLM requires hours of compilation but runs 30-50% faster. SGLang sits in between, optimizing for workloads where requests share structure.
-
----
-
-## vLLM Architecture: The Deep Dive
-
-### The Request Lifecycle
-
-Let's trace exactly what happens when a request hits vLLM:
+vLLM's APC (Automatic Prefix Caching) works by hashing fixed-size blocks of tokens and storing their KV cache entries in a hash table. When a new request arrives, the engine checks if the hash of each block already exists:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    vLLM REQUEST LIFECYCLE                           │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   1. API LAYER (FastAPI)                                            │
-│      ─────────────────────────────────────────────────────────     │
-│      POST /v1/completions                                           │
-│      │                                                              │
-│      ▼                                                              │
-│      Tokenize prompt → Create SequenceGroup                         │
-│      │                                                              │
-│      ▼                                                              │
-│      Add to AsyncLLMEngine.add_request() queue                      │
-│                                                                     │
-│   2. SCHEDULER (Python, runs every step)                            │
-│      ─────────────────────────────────────────────────────────     │
-│      │                                                              │
-│      ├─► Check waiting queue for new requests                       │
-│      │   └─► Can we allocate KV cache blocks? (Block Manager)       │
-│      │       └─► Yes: Move to running, allocate blocks              │
-│      │       └─► No: Keep waiting (or preempt if priority)          │
-│      │                                                              │
-│      ├─► For each running request:                                  │
-│      │   └─► Allocate 1 new block if current block is full          │
-│      │                                                              │
-│      └─► Build SchedulerOutput:                                     │
-│          • Which sequences to run this step                         │
-│          • Block tables (physical → logical mapping)                │
-│          • Prefill vs decode classification                         │
-│                                                                     │
-│   3. MODEL EXECUTOR (dispatches to workers)                         │
-│      ─────────────────────────────────────────────────────────     │
-│      │                                                              │
-│      ├─► Single GPU: Direct execution                               │
-│      └─► Multi-GPU: Ray or multiprocessing workers                  │
-│          └─► Each worker has model shard + KV cache shard           │
-│                                                                     │
-│   4. MODEL FORWARD PASS (CUDA kernels)                              │
-│      ─────────────────────────────────────────────────────────     │
-│      │                                                              │
-│      ├─► Embedding lookup                                           │
-│      ├─► For each layer:                                            │
-│      │   ├─► LayerNorm                                              │
-│      │   ├─► QKV projection                                         │
-│      │   ├─► PagedAttention kernel (reads KV cache via block table) │
-│      │   ├─► Output projection                                      │
-│      │   ├─► LayerNorm                                              │
-│      │   └─► MLP (gate, up, down projections)                       │
-│      ├─► Final LayerNorm                                            │
-│      └─► LM head → logits                                           │
-│                                                                     │
-│   5. SAMPLING (Python + CUDA)                                       │
-│      ─────────────────────────────────────────────────────────     │
-│      │                                                              │
-│      ├─► Apply temperature, top-p, top-k                            │
-│      ├─► Sample next token                                          │
-│      └─► Check stopping conditions (EOS, max_tokens)                │
-│                                                                     │
-│   6. OUTPUT (back to API)                                           │
-│      ─────────────────────────────────────────────────────────     │
-│      │                                                              │
-│      ├─► Streaming: Yield token immediately                         │
-│      └─► Non-streaming: Accumulate until done                       │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+Request A: [system_prompt | user_msg_1 | assistant_1 | user_msg_2]
+Request B: [system_prompt | user_msg_1 | assistant_1 | user_msg_3]
+
+Hash blocks: [block_0][block_1][block_2][block_3]...
+Match: blocks 0-2 are identical -> reuse their KV cache
 ```
 
-**Insight #2: The scheduler runs in Python and executes every decode step.** This is vLLM's main overhead source. At 100 tokens/second decode rate, the scheduler runs 100 times per second per request. V1 architecture moves scheduling to Rust to reduce this overhead.
+This works well for linear prefix chains (chat continuations). But it fails in three important scenarios:
 
-### The Block Manager: vLLM's Memory Allocator
+1. **Branching conversations**: when one prompt spawns multiple completions (beam search, parallel sampling), hash-based matching cannot share across branches efficiently.
+2. **Partial block matches**: if two requests share 95% of a block but differ in the last few tokens, the entire block is recomputed.
+3. **Cross-request prefix sharing**: when unrelated requests happen to share prefixes (common in RAG where multiple queries retrieve the same documents), hash tables require exact block boundary alignment.
 
-The Block Manager is the heart of PagedAttention. Let's understand exactly how it works:
+### How RadixAttention Solves This
+
+RadixAttention organizes the KV cache as a radix tree (also called a Patricia trie or compressed trie). Each edge in the tree represents a sequence of tokens, and each node stores the corresponding KV cache tensors:
+
+```
+Root
+ |
+ [system_prompt tokens 0-512]  <- shared by ALL requests
+ |
+ +-- [user_msg_1 tokens 513-600]
+ |    |
+ |    +-- [assistant_1 tokens 601-750]
+ |    |    |
+ |    |    +-- [user_msg_2 tokens 751-800]  <- Request A continues here
+ |    |    +-- [user_msg_3 tokens 751-820]  <- Request B branches here
+ |    |
+ |    +-- [assistant_2 tokens 601-780]      <- Different response, same prefix
+ |
+ +-- [user_msg_X tokens 513-590]            <- Completely different conversation
+```
+
+The tree structure provides several advantages over flat hash tables:
+
+**Longest prefix matching in O(log n)**. When a new request arrives, the engine traverses the tree from root to find the longest matching prefix. This is a single tree traversal, not a sequence of hash lookups. The complexity is O(log n) where n is the number of unique token sequences, compared to O(k) hash lookups where k is the number of blocks.
+
+**Variable-length sharing**. Because edges represent variable-length token sequences (not fixed blocks), two requests that share 513 tokens get full reuse even if 513 is not a multiple of the block size.
+
+**Automatic deduplication across request patterns**. The tree naturally deduplicates: if 1000 requests share the same system prompt, only one copy of those KV tensors exists in GPU memory. No explicit deduplication logic is needed.
+
+**Cache-aware scheduling**. The scheduler can prioritize requests whose prefixes are already cached (hot nodes in the tree), improving overall hit rates.
+
+### RadixAttention vs. vLLM APC: Quantitative Comparison
+
+| Dimension | vLLM APC | SGLang RadixAttention |
+|-----------|----------|----------------------|
+| Data structure | Hash table (block-level) | Radix tree (token-level) |
+| Match granularity | Fixed block size (16 tokens default) | Variable length, any boundary |
+| Lookup complexity | O(k) where k = num blocks | O(log n) tree traversal |
+| Cross-request sharing | Only if blocks align exactly | Automatic via tree structure |
+| Branching support | Limited (each branch is independent) | Native (branches share parent path) |
+| Memory overhead | Hash table entries per block | Tree nodes (more compact for shared prefixes) |
+| Eviction policy | LRU per block | LRU with tree-aware eviction (evict leaves first) |
+
+### Tree-Aware Eviction
+
+When GPU memory pressure requires evicting cached entries, SGLang's eviction policy respects the tree structure. Leaf nodes (recently completed requests with no children) are evicted first because they have no dependents. Internal nodes (shared prefixes) are evicted last because removing them invalidates all downstream entries. This contrasts with flat LRU eviction where a frequently shared prefix block might be evicted simply because no single request accessed it recently.
+
+The eviction algorithm assigns each node a "sharing score":
 
 ```python
-# Simplified Block Manager logic (actual vLLM code is more complex)
-
-class BlockManager:
-    def __init__(self, num_blocks: int, block_size: int):
-        self.block_size = block_size  # Tokens per block (default: 16)
-        self.num_blocks = num_blocks  # Total physical blocks
-
-        # Free block pool
-        self.free_blocks = list(range(num_blocks))
-
-        # Mapping: sequence_id → list of physical block indices
-        self.block_tables: dict[int, list[int]] = {}
-
-    def can_allocate(self, num_tokens: int) -> bool:
-        """Check if we can allocate blocks for a new sequence."""
-        blocks_needed = (num_tokens + self.block_size - 1) // self.block_size
-        return len(self.free_blocks) >= blocks_needed
-
-    def allocate(self, seq_id: int, num_tokens: int) -> list[int]:
-        """Allocate blocks for a new sequence (prefill)."""
-        blocks_needed = (num_tokens + self.block_size - 1) // self.block_size
-
-        allocated = []
-        for _ in range(blocks_needed):
-            block_id = self.free_blocks.pop()
-            allocated.append(block_id)
-
-        self.block_tables[seq_id] = allocated
-        return allocated
-
-    def append_slot(self, seq_id: int) -> int:
-        """Allocate one more slot for decode. May need new block."""
-        blocks = self.block_tables[seq_id]
-        current_block = blocks[-1]
-
-        # Check if current block has space
-        # (In reality, we track slots_used per block)
-        slots_in_last_block = len(blocks) * self.block_size - self._get_seq_len(seq_id)
-
-        if slots_in_last_block > 0:
-            # Current block has space
-            return current_block
-        else:
-            # Need new block
-            new_block = self.free_blocks.pop()
-            blocks.append(new_block)
-            return new_block
-
-    def free(self, seq_id: int):
-        """Free all blocks for a completed sequence."""
-        blocks = self.block_tables.pop(seq_id)
-        self.free_blocks.extend(blocks)
+# Simplified eviction scoring
+def eviction_priority(node):
+    # Nodes with more children are more valuable
+    sharing_factor = len(node.children) + sum(
+        eviction_priority(child) for child in node.children
+    )
+    # Recent access time also matters
+    recency = time.time() - node.last_access_time
+    # Higher score = evict later (more valuable)
+    return sharing_factor / (1 + recency * decay_rate)
 ```
 
-**Insight #3: Block allocation is O(1) for decode (just check if current block has space) but O(blocks_needed) for prefill.** This is why prefill of a 4K prompt is more expensive than 4K decode steps—not just compute, but also allocation overhead.
+This means a system prompt prefix shared by 500 active conversations will survive eviction pressure even if some individual conversations are idle, because the sharing factor dominates the recency component.
 
-### The PagedAttention Kernel
+### Implementation Detail: Cache-Aware Scheduling
 
-The magic happens in the PagedAttention CUDA kernel. Here's what it does:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    PAGEDATTENTION KERNEL                            │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   Input:                                                            │
-│   • Query tensor: [batch, num_heads, 1, head_dim] (decode)          │
-│   • Block tables: [batch, max_blocks] - physical block indices      │
-│   • KV cache: [num_blocks, 2, num_kv_heads, block_size, head_dim]   │
-│   • Context lengths: [batch] - how many tokens each sequence has    │
-│                                                                     │
-│   The kernel does:                                                  │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   for each sequence in batch:                                       │
-│       for each query head:                                          │
-│           # Determine which KV head (for GQA)                       │
-│           kv_head = query_head // num_kv_groups                     │
-│                                                                     │
-│           # Iterate through blocks in block table                   │
-│           for block_idx in block_table[sequence]:                   │
-│               # Load K, V from physical block                       │
-│               K_block = kv_cache[block_idx, 0, kv_head]  # [16, 128]│
-│               V_block = kv_cache[block_idx, 1, kv_head]  # [16, 128]│
-│                                                                     │
-│               # Compute attention scores for this block             │
-│               scores = Q @ K_block.T  # [1, 16]                     │
-│               # Accumulate weighted values                          │
-│               output += softmax(scores) @ V_block                   │
-│                                                                     │
-│   Key optimizations:                                                │
-│   • Blocks are processed in parallel across thread blocks           │
-│   • Softmax is computed in a numerically stable streaming fashion   │
-│   • Memory access is coalesced within blocks                        │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Insight #4: PagedAttention's overhead comes from the block table indirection.** Instead of reading KV cache from contiguous memory, we follow pointers. This adds ~5-10% overhead compared to contiguous attention, but the memory savings (60-80% less waste) more than compensate.
-
-### vLLM V0 vs V1: What Changed
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    vLLM V0 vs V1 ARCHITECTURE                       │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   V0 (Current Stable):                                              │
-│   ─────────────────────────────────────────────────────────────    │
-│   • Python scheduler runs synchronously every step                  │
-│   • Single-step execution: schedule → execute → schedule → ...      │
-│   • Chunked prefill: optional, manual enable                        │
-│   • torch.compile: limited support                                  │
-│                                                                     │
-│   Timeline:                                                         │
-│   [Sched][Execute][Sched][Execute][Sched][Execute]...               │
-│      ↑                ↑                                             │
-│      Python overhead  Python overhead                               │
-│                                                                     │
-│   V1 (Preview, becoming default):                                   │
-│   ─────────────────────────────────────────────────────────────    │
-│   • Rust scheduler (faster, async)                                  │
-│   • Multi-step execution: schedule once, execute N steps            │
-│   • Chunked prefill: default ON                                     │
-│   • torch.compile: full integration                                 │
-│                                                                     │
-│   Timeline:                                                         │
-│   [Sched][Execute][Execute][Execute][Sched][Execute][Execute]...    │
-│      ↑                                   ↑                          │
-│      Less frequent scheduling            Amortized overhead         │
-│                                                                     │
-│   Performance impact:                                               │
-│   • 20-40% throughput improvement                                   │
-│   • Lower P99 latency (less scheduling jitter)                      │
-│   • Better GPU utilization                                          │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Insight #5: V1's multi-step scheduling is the biggest win.** Instead of Python scheduler running 100 times/second, it runs 10-20 times/second with 5-10 steps batched. This alone accounts for most of the 20-40% improvement.
-
-### The 6 Critical vLLM Tuning Knobs (With Understanding)
-
-Most vLLM tuning guides list parameters without explaining the tradeoffs. Let's fix that:
+SGLang's scheduler integrates with the radix tree to make scheduling decisions. When multiple requests are waiting, the scheduler computes a "cache locality score" for each:
 
 ```python
-# vLLM Configuration Deep Dive
-
-from vllm import LLM, SamplingParams
-
-# ═══════════════════════════════════════════════════════════════════
-# KNOB 1: gpu_memory_utilization (0.0 - 1.0)
-# ═══════════════════════════════════════════════════════════════════
-#
-# What it controls: How much GPU memory vLLM reserves for KV cache
-#
-# The math:
-#   Total GPU memory = Model weights + KV cache + Activations + Overhead
-#   KV cache budget = GPU memory × utilization - (weights + activations + overhead)
-#
-# Example: 80GB H100, Llama 8B (16GB weights), 0.9 utilization
-#   KV cache budget = 80 × 0.9 - 16 - 2 - 1 = 53 GB
-#   At 512 MB per sequence (4K context), that's ~100 concurrent sequences
-#
-# Tradeoff:
-#   Higher → More KV cache → Higher batch size → Higher throughput
-#   Lower → Less KV cache → Room for other processes → Lower throughput
-#
-# Recommendation:
-#   Production (dedicated GPU): 0.90-0.95
-#   Shared GPU: 0.70-0.85
-#   Development: 0.80
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    gpu_memory_utilization=0.90,  # Default
-)
-
-# ═══════════════════════════════════════════════════════════════════
-# KNOB 2: max_num_seqs
-# ═══════════════════════════════════════════════════════════════════
-#
-# What it controls: Maximum concurrent sequences in a batch
-#
-# Why it matters:
-#   Each sequence needs KV cache memory
-#   More sequences = more memory pressure
-#   But also = better GPU utilization (more tokens per forward pass)
-#
-# The constraint:
-#   max_num_seqs × avg_kv_cache_per_seq ≤ KV cache budget
-#
-# Tradeoff:
-#   Higher → Better throughput (more parallelism)
-#   Higher → Higher latency (more competition for GPU)
-#   Lower → Lower latency (less queuing)
-#   Lower → Lower throughput (underutilized GPU)
-#
-# Recommendation:
-#   Throughput-focused: 256-1024
-#   Latency-focused: 32-128
-#   Balanced: 128-256
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    max_num_seqs=256,  # Default in V0
-)
-
-# ═══════════════════════════════════════════════════════════════════
-# KNOB 3: max_num_batched_tokens
-# ═══════════════════════════════════════════════════════════════════
-#
-# What it controls: Maximum tokens processed in one forward pass
-#
-# This is the MOST IMPORTANT throughput knob.
-#
-# Why it matters:
-#   Prefill: processes prompt_length tokens
-#   Decode: processes 1 token per sequence
-#   Mixed batch: prefill_tokens + num_decode_sequences
-#
-# The constraint:
-#   sum(tokens_per_sequence_this_step) ≤ max_num_batched_tokens
-#
-# Tradeoff:
-#   Higher → Better throughput (larger batches)
-#   Higher → Higher latency (longer forward passes)
-#   Higher → More activation memory
-#   Lower → Lower latency
-#   Lower → Lower throughput
-#
-# Recommendation:
-#   Throughput-focused: 16384-32768
-#   Latency-focused: 2048-4096
-#   Balanced: 4096-8192
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    max_num_batched_tokens=8192,
-)
-
-# ═══════════════════════════════════════════════════════════════════
-# KNOB 4: enable_chunked_prefill
-# ═══════════════════════════════════════════════════════════════════
-#
-# What it controls: Whether long prefills are split into chunks
-#
-# Why it matters:
-#   Without chunking: 8K prompt blocks ALL decode for ~400ms
-#   With chunking: 8K prompt processed in 4 × 2K chunks, interleaved
-#
-# The mechanism:
-#   Prefill is split into chunks of ~max_num_batched_tokens
-#   Between chunks, decode steps for other sequences run
-#   Prevents "starvation" of existing requests
-#
-# Tradeoff:
-#   Enabled → Consistent latency for all requests
-#   Enabled → Slightly higher TTFT for long prompts
-#   Disabled → Lower TTFT for long prompts (if no other requests)
-#   Disabled → Latency spikes for existing requests
-#
-# Recommendation:
-#   Production: ALWAYS enable
-#   Benchmarking single requests: Can disable
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    enable_chunked_prefill=True,  # Default ON in V1
-)
-
-# ═══════════════════════════════════════════════════════════════════
-# KNOB 5: enable_prefix_caching
-# ═══════════════════════════════════════════════════════════════════
-#
-# What it controls: Whether KV cache is shared for common prefixes
-#
-# Why it matters:
-#   System prompt: "You are a helpful assistant..." (100 tokens)
-#   Without caching: Computed 1000× for 1000 requests
-#   With caching: Computed once, reused 1000×
-#
-# The mechanism:
-#   Hash prompt tokens → Check if KV cache exists
-#   If exists: Reuse cached KV blocks (copy-on-write)
-#   If not: Compute and cache for future requests
-#
-# Tradeoff:
-#   Enabled → Faster TTFT for repeated prefixes
-#   Enabled → Memory overhead for cache management
-#   Enabled → Slight overhead for cache lookups
-#   Disabled → No overhead, but no reuse
-#
-# When it helps:
-#   • Chatbots with system prompts
-#   • RAG with repeated context
-#   • Few-shot learning with same examples
-#
-# When it doesn't help:
-#   • Every prompt is unique
-#   • Batch processing with no repetition
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    enable_prefix_caching=True,
-)
-
-# ═══════════════════════════════════════════════════════════════════
-# KNOB 6: tensor_parallel_size
-# ═══════════════════════════════════════════════════════════════════
-#
-# What it controls: How many GPUs share the model via tensor parallelism
-#
-# Why it matters:
-#   70B model needs ~140GB in FP16
-#   Single H100: 80GB → Doesn't fit
-#   TP=2: 70GB per GPU → Fits
-#
-# The mechanism:
-#   Weight matrices split across GPUs
-#   Each GPU computes partial result
-#   AllReduce to combine results
-#
-# Tradeoff:
-#   Higher TP → Fits larger models
-#   Higher TP → More memory bandwidth (good for decode)
-#   Higher TP → AllReduce overhead
-#   Higher TP → Requires NVLink for efficiency
-#
-# Scaling efficiency:
-#   TP=2: ~1.8× throughput (90% efficiency)
-#   TP=4: ~3.2× throughput (80% efficiency)
-#   TP=8: ~5.6× throughput (70% efficiency)
-#
-# Recommendation:
-#   Use minimum TP that fits your model
-#   Prefer TP=2 or TP=4 over TP=8 if possible
-#   TP > 8 rarely makes sense (use pipeline parallelism instead)
-
-llm = LLM(
-    model="meta-llama/Llama-3.1-70B-Instruct",
-    tensor_parallel_size=4,
-)
+# Simplified cache-aware scheduling logic
+def schedule_next_batch(waiting_requests, radix_tree):
+    scored = []
+    for req in waiting_requests:
+        # How many tokens of this request are already cached?
+        cached_prefix_len = radix_tree.longest_prefix_match(req.tokens)
+        # Ratio of cached to total prefix
+        locality_score = cached_prefix_len / len(req.tokens)
+        scored.append((locality_score, req))
+    
+    # Prefer requests with high cache locality
+    scored.sort(reverse=True)
+    return select_batch(scored, max_batch_tokens=budget)
 ```
 
-**Insight #6: The three most impactful knobs are max_num_batched_tokens (throughput), max_num_seqs (concurrency), and enable_chunked_prefill (latency consistency).** gpu_memory_utilization and tensor_parallel_size are usually set once based on hardware. prefix_caching depends on workload.
-
-### Configuration Profiles for Common Workloads
-
-```bash
-# ═══════════════════════════════════════════════════════════════════
-# PROFILE 1: Real-time Chat (Latency-Optimized)
-# ═══════════════════════════════════════════════════════════════════
-# Goal: Minimize TTFT and ITL for interactive users
-# Tradeoff: Lower throughput
-
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-    --gpu-memory-utilization 0.85 \
-    --max-num-seqs 64 \
-    --max-num-batched-tokens 4096 \
-    --enable-chunked-prefill \
-    --enable-prefix-caching
-
-# Why these values:
-# • Lower max-num-seqs: Less competition, lower queuing delay
-# • Lower max-num-batched-tokens: Smaller forward passes, lower latency
-# • Chunked prefill: Prevents long prompts from blocking
-# • Prefix caching: System prompts are reused
-
-# ═══════════════════════════════════════════════════════════════════
-# PROFILE 2: Batch Processing (Throughput-Optimized)
-# ═══════════════════════════════════════════════════════════════════
-# Goal: Maximize tokens/second for offline processing
-# Tradeoff: Higher latency per request
-
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-    --gpu-memory-utilization 0.95 \
-    --max-num-seqs 512 \
-    --max-num-batched-tokens 32768 \
-    --enable-chunked-prefill
-
-# Why these values:
-# • Higher gpu-memory-utilization: Use all available memory
-# • Higher max-num-seqs: Maximum parallelism
-# • Higher max-num-batched-tokens: Larger batches
-# • No prefix caching: Prompts don't repeat in batch processing
-
-# ═══════════════════════════════════════════════════════════════════
-# PROFILE 3: RAG Application (Balanced)
-# ═══════════════════════════════════════════════════════════════════
-# Goal: Good latency with high throughput, repeated context
-# Tradeoff: Balanced
-
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-    --gpu-memory-utilization 0.90 \
-    --max-num-seqs 128 \
-    --max-num-batched-tokens 8192 \
-    --enable-chunked-prefill \
-    --enable-prefix-caching
-
-# Why these values:
-# • Prefix caching: RAG context often repeats
-# • Moderate batch sizes: Balance latency and throughput
-# • Chunked prefill: RAG prompts can be long (retrieved docs)
-
-# ═══════════════════════════════════════════════════════════════════
-# PROFILE 4: Large Model Multi-GPU (70B on 4× H100)
-# ═══════════════════════════════════════════════════════════════════
-
-vllm serve meta-llama/Llama-3.1-70B-Instruct \
-    --tensor-parallel-size 4 \
-    --gpu-memory-utilization 0.90 \
-    --max-num-seqs 64 \
-    --max-num-batched-tokens 8192 \
-    --enable-chunked-prefill \
-    --enable-prefix-caching
-
-# Why these values:
-# • TP=4: 70B needs ~140GB, 4×80GB H100 = 320GB (plenty of room)
-# • Lower max-num-seqs: KV cache per sequence is larger for 70B
-# • Prefix caching: Even more valuable for expensive prefills
-```
-
-**Insight #7: There's no universal "best" configuration. The optimal settings depend on your latency SLA, throughput requirements, and workload characteristics.** Start with a profile, measure, and iterate.
+This means that after processing a batch of requests with the same system prompt, subsequent requests with that prompt are prioritized because their KV cache is "hot." The effect is a natural batching of similar workloads without explicit routing logic.
 
 ---
 
-## SGLang: RadixAttention and Beyond
+## Structured Generation at the Engine Level
 
-### Why SGLang Exists
+### Why Post-Hoc Masking Is Slow
 
-vLLM optimizes for independent requests. But many LLM workloads have structure:
+Most frameworks implement constrained decoding as a logit processor: after the model produces logits for the next token, a mask is applied to zero out tokens that would violate the constraint (e.g., produce invalid JSON). This approach has three problems:
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    THE PROBLEM SGLANG SOLVES                        │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   Scenario: Multi-turn chatbot with 1000 concurrent users           │
-│                                                                     │
-│   System prompt (shared by ALL users):                              │
-│   "You are a helpful assistant for Audible. You help users with     │
-│    audiobook recommendations, account issues, and app support.      │
-│    Always be friendly and concise."                                 │
-│   = 50 tokens                                                       │
-│                                                                     │
-│   With vLLM (basic prefix caching):                                 │
-│   ─────────────────────────────────────────────────────────────    │
-│   • System prompt KV cache: computed once, shared                   │
-│   • But: Each user's conversation history is separate               │
-│   • User A turn 3 and User B turn 3 share nothing                   │
-│                                                                     │
-│   With SGLang (RadixAttention):                                     │
-│   ─────────────────────────────────────────────────────────────    │
-│   • System prompt: shared (same as vLLM)                            │
-│   • Common conversation patterns: also shared!                      │
-│   • "User: How do I cancel?" appears in 100 conversations           │
-│   • That prefix is computed once, reused 100×                       │
-│                                                                     │
-│   The insight: Real workloads have MORE sharing than just           │
-│   system prompts. RadixAttention captures ALL prefix sharing.       │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+1. **Serial overhead per token**. Computing the valid token mask requires evaluating the constraint grammar against the current partial output. For complex JSON schemas or regex patterns, this can take 1-5ms per token, which is comparable to the model forward pass itself for small models.
 
-**Insight #8: RadixAttention is a generalization of prefix caching.** vLLM's prefix caching shares exact prefix matches. RadixAttention shares ANY common prefix, building a tree of all seen prefixes.
+2. **No batch optimization**. When different requests in the same batch have different constraints, the masking logic runs independently for each request. There is no opportunity to share computation across requests with similar schemas.
 
-### RadixAttention: How It Works
+3. **Scheduling blindness**. The scheduler has no visibility into constraint state. It cannot predict which tokens will be masked, leading to wasted computation: the model generates logits for tokens that will never be selected.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    RADIXATTENTION DATA STRUCTURE                    │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   A Radix Tree (also called Patricia Trie) for KV cache:            │
-│                                                                     │
-│                         [ROOT]                                      │
-│                            │                                        │
-│              ┌─────────────┴─────────────┐                          │
-│              ▼                           ▼                          │
-│   ["You are a helpful"]         ["The capital of"]                  │
-│   KV: blocks [0,1,2]            KV: blocks [10,11]                  │
-│              │                           │                          │
-│     ┌────────┴────────┐          ┌───────┴───────┐                  │
-│     ▼                 ▼          ▼               ▼                  │
-│ ["assistant"]    ["expert in"]  ["France"]    ["Japan"]             │
-│ KV: block [3]    KV: block [4]  KV: block[12] KV: block[13]         │
-│     │                 │              │               │              │
-│     ▼                 ▼              ▼               ▼              │
-│ ["User:"]        ["Python"]     ["is Paris"]    ["is Tokyo"]        │
-│ KV: block[5]     KV: block[6]   KV: block[14]   KV: block[15]       │
-│                                                                     │
-│   Request: "You are a helpful assistant. User: Hello"               │
-│   ─────────────────────────────────────────────────────────────    │
-│   1. Traverse tree: ROOT → "You are a helpful" → "assistant"        │
-│      → "User:"                                                      │
-│   2. Found! Reuse KV blocks [0,1,2,3,5]                             │
-│   3. Only compute KV for "Hello" (new suffix)                       │
-│                                                                     │
-│   Request: "You are a helpful expert in Python. How do I..."        │
-│   ─────────────────────────────────────────────────────────────    │
-│   1. Traverse: ROOT → "You are a helpful" → "expert in" → "Python"  │
-│   2. Reuse KV blocks [0,1,2,4,6]                                    │
-│   3. Compute KV for "How do I..." (new suffix)                      │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+### SGLang's Integrated Approach
 
-**Insight #9: RadixAttention's tree structure means prefix matching is O(prefix_length), not O(num_cached_prefixes).** vLLM's hash-based prefix cache is O(1) for exact matches but can't find partial matches. RadixAttention finds the longest matching prefix efficiently.
+SGLang moves structured generation into the engine's core loop. Instead of masking after logit computation, the engine:
 
-### When SGLang Beats vLLM
+1. **Pre-computes constraint automata**. When a request specifies a JSON schema or regex, SGLang compiles it into a finite state automaton (FSA) at request submission time. This compilation happens once, not per token.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    SGLANG vs vLLM: WHEN TO USE WHICH                │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   SGLang WINS (use it):                                             │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   1. Multi-turn conversations with shared patterns                  │
-│      • Chatbots where users ask similar questions                   │
-│      • Customer support with common issues                          │
-│      • Speedup: 20-50% from prefix reuse                            │
-│                                                                     │
-│   2. Structured output generation                                   │
-│      • JSON with schema constraints                                 │
-│      • Code with syntax constraints                                 │
-│      • SGLang's constrained decoding is native, not bolted on       │
-│      • Speedup: 10-30% from efficient constraint checking           │
-│                                                                     │
-│   3. Multi-step LLM programs                                        │
-│      • Chain-of-thought with multiple generations                   │
-│      • Tool use with interleaved calls                              │
-│      • SGLang compiles the program, optimizes across steps          │
-│      • Speedup: 30-100% from cross-step optimization                │
-│                                                                     │
-│   4. Tree-based generation                                          │
-│      • Beam search                                                  │
-│      • Best-of-N sampling                                           │
-│      • RadixAttention shares prefixes across branches               │
-│      • Speedup: 50-80% from branch sharing                          │
-│                                                                     │
-│   vLLM WINS (use it):                                               │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   1. Simple request/response with unique prompts                    │
-│      • Batch processing of diverse inputs                           │
-│      • No prefix sharing opportunity                                │
-│      • vLLM has lower overhead                                      │
-│                                                                     │
-│   2. Maximum model compatibility                                    │
-│      • vLLM supports more models out of the box                     │
-│      • Newer architectures often land in vLLM first                 │
-│                                                                     │
-│   3. Simpler deployment                                             │
-│      • vLLM's API is more mature                                    │
-│      • Better documentation and community support                   │
-│                                                                     │
-│   4. When you need speculative decoding                             │
-│      • vLLM's speculative decoding is more mature                   │
-│      • SGLang's is catching up but less tested                      │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+2. **Batches constraint evaluation**. Requests with identical schemas share the same compiled FSA. The engine groups these requests and evaluates constraint transitions in parallel using CUDA kernels.
 
-**Insight #10: The decision isn't "SGLang vs vLLM" but "does my workload have exploitable structure?"** If yes, SGLang's RadixAttention and program compiler can provide significant speedups. If no, vLLM's simpler architecture has less overhead.
+3. **Integrates with the scheduler**. The scheduler knows which tokens are valid for each request at each step. It can skip unnecessary logit computation for tokens that are predetermined by the grammar (e.g., the opening `{` of a JSON object).
 
-### SGLang's Constrained Decoding
-
-SGLang's structured output is fundamentally different from vLLM's JSON mode:
+4. **Jump-forward optimization**. When the grammar uniquely determines the next several tokens (e.g., after `{"name":` the next token must be `"`), SGLang skips the model forward pass entirely and directly appends those tokens. This can skip 20-40% of decode steps for structured outputs.
 
 ```python
-# vLLM JSON mode: Post-hoc validation
-# ─────────────────────────────────────────────────────────────────
-# vLLM generates tokens, then validates JSON at the end
-# If invalid, you get an error or malformed output
-
-from vllm import LLM, SamplingParams
-
-llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct")
-params = SamplingParams(
-    temperature=0.7,
-    # guided_json validates but doesn't constrain during generation
-)
-
-# SGLang constrained decoding: Token-level constraints
-# ─────────────────────────────────────────────────────────────────
-# SGLang masks invalid tokens BEFORE sampling
-# Output is GUARANTEED to match the constraint
-
+# Constrained decoding with SGLang (user-facing API)
 import sglang as sgl
 
 @sgl.function
 def extract_person(s, text):
-    s += f"Extract person info from: {text}\n"
+    s += "Extract person info from: " + text + "\n"
     s += "Output JSON:\n"
+    s += sgl.gen("result", 
+                 max_tokens=256,
+                 regex=r'\{"name": "[^"]+", "age": \d+, "city": "[^"]+"\}')
 
-    # This regex constraint is applied at EVERY token
-    # Invalid tokens are masked to probability 0
-    s += sgl.gen(
-        "result",
-        regex=r'\{"name": "[A-Za-z ]+", "age": \d+, "city": "[A-Za-z ]+"\}'
-    )
-
-# The difference in practice:
-# ─────────────────────────────────────────────────────────────────
-# vLLM: Model might generate {"name": "John", "age": "thirty", ...}
-#       → Invalid! "thirty" is not a number
-#       → You need retry logic
-#
-# SGLang: After generating "age": , only digit tokens are allowed
-#         → Model MUST generate a number
-#         → No retries needed, 100% valid output
+# The regex is compiled to an FSA once, then reused across all calls
 ```
 
-**Insight #11: SGLang's constrained decoding is compile-time, not runtime.** The regex/grammar is compiled into a finite state machine. At each token, SGLang computes which tokens are valid transitions and masks the rest. This adds ~5% overhead but guarantees valid output.
+### The Jump-Forward Mechanism in Detail
 
-### SGLang Program Compilation
+Jump-forward is SGLang's most impactful optimization for structured workloads. Consider generating a JSON object with schema `{"name": string, "age": integer}`:
 
-SGLang's most powerful feature is its program compiler:
+```
+Token 1: {           <- determined by grammar (only valid start)
+Token 2: "           <- determined (object key must start with quote)  
+Token 3: n           <- determined (only field is "name")
+Token 4: a           <- determined
+Token 5: m           <- determined
+Token 6: e           <- determined
+Token 7: "           <- determined (close quote)
+Token 8: :           <- determined (key-value separator)
+Token 9: " or space  <- determined (string value starts)
+Token 10-N: [model generates actual name]  <- ACTUAL GENERATION NEEDED
+Token N+1: "         <- determined (close string)
+Token N+2: ,         <- determined (more fields follow)
+...
+```
 
-````python
-import sglang as sgl
+Of the ~25 tokens in a typical 2-field JSON response, only 5-8 require actual model inference. The rest are deterministic given the schema. Jump-forward skips all deterministic tokens in a single step, reducing decode iterations by 60-75% for highly structured outputs.
 
-# A multi-step LLM program
-@sgl.function
-def analyze_code(s, code):
-    # Step 1: Identify the language
-    s += f"Code:\n```\n{code}\n```\n\n"
-    s += "Programming language: "
-    s += sgl.gen("language", max_tokens=10, stop="\n")
+The savings compound with schema complexity: a nested 3-level JSON object with 15 fields might have 120 total tokens but only 30 that require model generation.
 
-    # Step 2: Find bugs (depends on step 1)
-    s += f"\n\nBugs in this {s['language']} code:\n"
-    s += sgl.gen("bugs", max_tokens=200)
+### Performance Impact of Engine-Level Constraints
 
-    # Step 3: Suggest fixes (depends on step 2)
-    s += "\n\nSuggested fixes:\n"
-    s += sgl.gen("fixes", max_tokens=200)
+The difference between post-hoc masking and engine-level integration is dramatic for structured workloads:
 
-# What SGLang's compiler does:
-# ─────────────────────────────────────────────────────────────────
-# 1. Analyzes the program structure
-# 2. Identifies that steps 1, 2, 3 share a growing prefix
-# 3. Schedules KV cache to be retained across steps
-# 4. Batches multiple programs together when possible
-#
-# Without compilation (naive approach):
-#   Step 1: Prefill "Code:...", generate "language"
-#   Step 2: Prefill "Code:... language... Bugs:", generate "bugs"
-#           ↑ Recomputes KV for "Code:... language"!
-#   Step 3: Prefill everything again
-#           ↑ Recomputes KV for everything!
-#
-# With SGLang compilation:
-#   Step 1: Prefill "Code:...", generate "language", KEEP KV cache
-#   Step 2: Prefill only "Bugs:", generate "bugs", KEEP KV cache
-#   Step 3: Prefill only "Suggested fixes:", generate "fixes"
-#
-# Speedup: 2-3× for multi-step programs
-````
+| Workload | Post-hoc masking (tokens/s) | SGLang integrated (tokens/s) | Speedup |
+|----------|----------------------------|------------------------------|---------|
+| Simple JSON (5 fields) | 850 | 4,200 | 4.9x |
+| Nested JSON (3 levels) | 620 | 3,800 | 6.1x |
+| Complex regex (email + phone) | 740 | 5,100 | 6.9x |
+| SQL query generation | 580 | 4,500 | 7.8x |
+| Tool call (function + args) | 690 | 4,800 | 7.0x |
 
-**Insight #12: SGLang's compiler transforms sequential LLM calls into a single optimized execution plan.** This is similar to how SQL query optimizers transform queries—the logical program is the same, but the physical execution is much more efficient.
+*Benchmarks from SGLang paper (arXiv 2312.07104), Llama-2 7B, A100 80GB, batch size 32.*
+
+The speedup comes from three sources: (1) jump-forward skipping model calls for deterministic tokens, (2) batched FSA evaluation on GPU, and (3) elimination of CPU-side grammar evaluation overhead.
 
 ---
 
-## TensorRT-LLM: The Compilation Approach
+## The SGLang Programming Model
 
-### Why Compilation Matters
+### Beyond Request/Response: Programs as First-Class Constructs
 
-vLLM and SGLang use PyTorch with custom CUDA kernels for hot paths. TensorRT-LLM takes a different approach: compile the entire model to an optimized TensorRT engine.
+Most serving engines expose a simple interface: send a prompt, get a completion. SGLang exposes a programming model where you define generation *programs* that combine multiple generation calls, control flow, and constraints into a single optimizable unit:
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    PYTORCH vs TENSORRT EXECUTION                    │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   PyTorch (vLLM, SGLang):                                           │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   Python                                                            │
-│      │                                                              │
-│      ▼                                                              │
-│   PyTorch dispatcher (decides which kernel to call)                 │
-│      │                                                              │
-│      ▼                                                              │
-│   CUDA kernel 1 (e.g., LayerNorm)                                   │
-│      │                                                              │
-│      ▼                                                              │
-│   Back to Python/PyTorch                                            │
-│      │                                                              │
-│      ▼                                                              │
-│   CUDA kernel 2 (e.g., Linear)                                      │
-│      │                                                              │
-│      ▼                                                              │
-│   ... (repeat for every operation)                                  │
-│                                                                     │
-│   Overhead: Kernel launch latency (~5-10μs per kernel)              │
-│   A transformer layer has ~20 kernels → 100-200μs overhead/layer    │
-│   32 layers → 3-6ms overhead per forward pass                       │
-│                                                                     │
-│   TensorRT:                                                         │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   C++ Runtime                                                       │
-│      │                                                              │
-│      ▼                                                              │
-│   TensorRT Engine (pre-compiled, fused kernels)                     │
-│      │                                                              │
-│      ▼                                                              │
-│   Fused CUDA kernel (LayerNorm + Linear + Activation)               │
-│      │                                                              │
-│      ▼                                                              │
-│   Fused CUDA kernel (Attention)                                     │
-│      │                                                              │
-│      ▼                                                              │
-│   ... (fewer, larger kernels)                                       │
-│                                                                     │
-│   Overhead: Minimal kernel launch overhead                          │
-│   Fused kernels: 5-10 per layer instead of 20                       │
-│   32 layers → 0.5-1ms overhead per forward pass                     │
-│                                                                     │
-│   Speedup from reduced overhead: 10-20%                             │
-│   Speedup from kernel fusion: 10-30%                                │
-│   Total: 20-50% faster than PyTorch                                 │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+```python
+import sglang as sgl
+
+@sgl.function
+def multi_step_reasoning(s, question):
+    # Step 1: Generate initial reasoning
+    s += f"Question: {question}\n"
+    s += "Let me think step by step.\n"
+    s += sgl.gen("thinking", max_tokens=256, temperature=0.7)
+    
+    # Step 2: Extract the answer from reasoning
+    s += "\nTherefore, the answer is: "
+    s += sgl.gen("answer", max_tokens=50, temperature=0.0)
+    
+    # Step 3: Verify with a different prompt structure
+    s += "\n\nVerification: Is this correct? "
+    s += sgl.gen("verification", 
+                 choices=["Yes, this is correct.", "No, let me reconsider."])
 ```
 
-**Insight #13: TensorRT's speedup comes from two sources: fewer kernel launches (fusion) and optimized kernel implementations.** The compilation process analyzes the entire graph and finds opportunities that per-operator optimization misses.
+The key insight: because all three generation steps are part of the same program, SGLang can:
+- Keep the KV cache from step 1 alive for steps 2 and 3 (no re-prefill).
+- Schedule all three steps as a unit, avoiding the overhead of three separate API calls.
+- Optimize the combined program (e.g., if step 3 always selects "Yes", future runs can skip it).
 
-### The TensorRT-LLM Compilation Pipeline
+Without a programming model, the same workflow requires three separate API calls. Each call re-sends the full context (or relies on external session management), and the serving engine has no visibility into the relationship between calls. The accumulated overhead of re-prefilling shared context across multiple calls is substantial: for a 2000-token context with 3 steps, you pay 6000 prefill tokens instead of 2000.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    TENSORRT-LLM BUILD PIPELINE                      │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   STEP 1: Convert Checkpoint                                        │
-│   ─────────────────────────────────────────────────────────────    │
-│   Input: HuggingFace model (PyTorch weights)                        │
-│   Output: TensorRT-LLM checkpoint (reorganized weights)             │
-│                                                                     │
-│   python convert_checkpoint.py \                                    │
-│       --model_dir ./llama-3.1-8b \                                  │
-│       --output_dir ./trt_ckpt \                                     │
-│       --dtype float16 \                                             │
-│       --tp_size 1                                                   │
-│                                                                     │
-│   What happens:                                                     │
-│   • Weights are transposed/reshaped for TensorRT's layout           │
-│   • Quantization calibration (if using INT8/FP8)                    │
-│   • Tensor parallel sharding (if tp_size > 1)                       │
-│                                                                     │
-│   STEP 2: Build Engine                                              │
-│   ─────────────────────────────────────────────────────────────    │
-│   Input: TensorRT-LLM checkpoint                                    │
-│   Output: Optimized TensorRT engine (.engine file)                  │
-│                                                                     │
-│   trtllm-build \                                                    │
-│       --checkpoint_dir ./trt_ckpt \                                 │
-│       --output_dir ./trt_engine \                                   │
-│       --gemm_plugin float16 \                                       │
-│       --gpt_attention_plugin float16 \                              │
-│       --max_batch_size 64 \                                         │
-│       --max_input_len 2048 \                                        │
-│       --max_output_len 512 \                                        │
-│       --max_num_tokens 8192                                         │
-│                                                                     │
-│   What happens (this is the slow part, 10-60 minutes):              │
-│   • Graph optimization (constant folding, dead code elimination)    │
-│   • Kernel fusion (combine adjacent operations)                     │
-│   • Kernel auto-tuning (try different implementations, pick best)   │
-│   • Memory planning (optimize tensor lifetimes)                     │
-│   • Quantization (if enabled)                                       │
-│                                                                     │
-│   STEP 3: Run Inference                                             │
-│   ─────────────────────────────────────────────────────────────    │
-│   Input: TensorRT engine + input tokens                             │
-│   Output: Generated tokens                                          │
-│                                                                     │
-│   # Python API                                                      │
-│   from tensorrt_llm import LLM                                      │
-│   llm = LLM(model="./trt_engine")                                   │
-│   output = llm.generate("Hello, world!")                            │
-│                                                                     │
-│   # Or use Triton Inference Server                                  │
-│   # (recommended for production)                                    │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+### Fork and Join: Parallel Generation
+
+SGLang supports forking a generation into multiple parallel branches, then joining the results. This is essential for techniques like best-of-N sampling, tree-of-thought reasoning, and parallel tool calling:
+
+```python
+@sgl.function
+def parallel_tool_calls(s, user_query):
+    s += f"User: {user_query}\n"
+    s += "I need to call multiple tools:\n"
+    
+    # Fork into 3 parallel tool calls
+    # All share the prefix KV cache via RadixAttention
+    forks = s.fork(3)
+    
+    forks[0] += "Tool: search\nQuery: "
+    forks[0] += sgl.gen("search_query", max_tokens=50)
+    
+    forks[1] += "Tool: calculator\nExpression: "
+    forks[1] += sgl.gen("calc_expr", max_tokens=30, 
+                        regex=r'[\d+\-*/().\s]+')
+    
+    forks[2] += "Tool: calendar\nAction: "
+    forks[2] += sgl.gen("calendar_action", max_tokens=40,
+                        regex=r'\{"action": "(create|read|update)", "date": "\d{4}-\d{2}-\d{2}"\}')
+    
+    # Join results back
+    s += sgl.join(forks)
+    s += "\nBased on tool results, my answer is: "
+    s += sgl.gen("final_answer", max_tokens=200)
 ```
 
-**Insight #14: The max_batch_size, max_input_len, max_output_len parameters are BAKED INTO the engine.** Unlike vLLM where you can change these at runtime, TensorRT engines are compiled for specific shapes. If you need different shapes, you need to rebuild.
+The fork operation creates branches that share the parent's KV cache via RadixAttention. This means the system prompt and conversation history (which might be 2000+ tokens) are computed once and shared across all three tool call branches. Without RadixAttention, each branch would need to re-prefill the entire prefix.
 
-### TensorRT-LLM's Key Optimizations
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    TENSORRT-LLM OPTIMIZATIONS                       │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   1. KERNEL FUSION                                                  │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   Before fusion:                                                    │
-│   LayerNorm → Q_proj → K_proj → V_proj → Reshape → Attention        │
-│   (6 kernel launches, 6 memory round-trips)                         │
-│                                                                     │
-│   After fusion:                                                     │
-│   FusedQKVLayerNorm → FusedAttention                                │
-│   (2 kernel launches, 2 memory round-trips)                         │
-│                                                                     │
-│   Benefit: 3× fewer kernel launches, 3× less memory traffic         │
-│                                                                     │
-│   2. GEMM PLUGIN                                                    │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   TensorRT's default GEMM vs TensorRT-LLM's GEMM plugin:            │
-│   • Plugin uses cuBLAS with LLM-specific tuning                     │
-│   • Optimized for the specific shapes in transformers               │
-│   • FP8 support on H100 with tensor cores                           │
-│                                                                     │
-│   Benefit: 10-20% faster matrix multiplications                     │
-│                                                                     │
-│   3. IN-FLIGHT BATCHING                                             │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   TensorRT-LLM's version of continuous batching:                    │
-│   • Implemented in C++ (lower overhead than Python)                 │
-│   • Integrated with TensorRT's memory management                    │
-│   • Supports paged KV cache (similar to vLLM)                       │
-│                                                                     │
-│   Benefit: Same throughput benefits as vLLM, lower overhead         │
-│                                                                     │
-│   4. QUANTIZATION                                                   │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   TensorRT-LLM supports:                                            │
-│   • FP8 (H100 native, best quality/speed tradeoff)                  │
-│   • INT8 with SmoothQuant (good quality, wide hardware support)     │
-│   • INT4 with AWQ/GPTQ (maximum compression)                        │
-│   • Mixed precision (different layers at different precision)       │
-│                                                                     │
-│   Benefit: Same memory savings as vLLM, but with compiled kernels   │
-│                                                                     │
-│   5. SPECULATIVE DECODING                                           │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   TensorRT-LLM supports draft model speculation:                    │
-│   • Draft and target models both compiled                           │
-│   • Verification is a single fused kernel                           │
-│   • Lower overhead than Python-based verification                   │
-│                                                                     │
-│   Benefit: 10-20% better speculative decoding speedup               │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Insight #15: TensorRT-LLM's optimizations are the same as vLLM's (PagedAttention, continuous batching, quantization) but implemented with compiled kernels instead of Python + custom CUDA.** The 20-50% speedup comes from lower overhead, not fundamentally different algorithms.
-
-### When TensorRT-LLM Makes Sense
+The memory savings from fork/join are proportional to the prefix length and number of branches:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    TENSORRT-LLM DECISION GUIDE                      │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   USE TensorRT-LLM when:                                            │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   ✓ Model is stable (not changing frequently)                       │
-│     → Compilation takes 10-60 minutes per configuration             │
-│     → Changing model = recompile                                    │
-│                                                                     │
-│   ✓ Workload shapes are predictable                                 │
-│     → max_batch_size, max_seq_len are baked in                      │
-│     → Different shapes = different engines                          │
-│                                                                     │
-│   ✓ Running on NVIDIA GPUs (especially H100)                        │
-│     → TensorRT is NVIDIA-only                                       │
-│     → H100 FP8 support is excellent                                 │
-│                                                                     │
-│   ✓ Maximum performance is worth the complexity                     │
-│     → 20-50% faster than vLLM                                       │
-│     → But: More complex deployment, less flexibility                │
-│                                                                     │
-│   ✓ Using Triton Inference Server                                   │
-│     → TensorRT-LLM integrates natively with Triton                  │
-│     → Production-grade serving with model management                │
-│                                                                     │
-│   DON'T USE TensorRT-LLM when:                                      │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   ✗ Rapid iteration needed                                          │
-│     → vLLM: change model in seconds                                 │
-│     → TensorRT-LLM: recompile for 30 minutes                        │
-│                                                                     │
-│   ✗ Workload shapes vary widely                                     │
-│     → Would need multiple engines for different shapes              │
-│     → Memory overhead of multiple engines                           │
-│                                                                     │
-│   ✗ Using non-NVIDIA hardware                                       │
-│     → TensorRT is NVIDIA-only                                       │
-│     → Use vLLM or SGLang instead                                    │
-│                                                                     │
-│   ✗ Need structured output / constrained decoding                   │
-│     → TensorRT-LLM's support is limited                             │
-│     → SGLang is much better for this                                │
-│                                                                     │
-│   ✗ Team lacks TensorRT expertise                                   │
-│     → Debugging compiled engines is harder                          │
-│     → vLLM errors are more interpretable                            │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+Memory without fork: prefix_tokens * num_branches * 2 * d_model * num_layers
+Memory with fork:    prefix_tokens * 1 * 2 * d_model * num_layers + branch_tokens * num_branches * 2 * d_model * num_layers
+
+For Llama-3 70B with 2000-token prefix, 3 branches of 100 tokens each:
+  Without: 2000 * 3 * 2 * 8192 * 80 = 7.5 GB
+  With:    2000 * 1 * 2 * 8192 * 80 + 100 * 3 * 2 * 8192 * 80 = 2.9 GB (61% savings)
 ```
 
-**Insight #16: TensorRT-LLM is the "production at scale" choice, not the "getting started" choice.** Start with vLLM, measure your performance, and only move to TensorRT-LLM if you need that extra 20-50% and can accept the complexity.
+### Select: Efficient Classification
+
+The `select` primitive generates a token sequence that matches one of a predefined set of options. This is more efficient than generating freely and checking:
+
+```python
+@sgl.function
+def classify_intent(s, message):
+    s += f"Classify the intent of: '{message}'\n"
+    s += "Intent: "
+    s += sgl.select("intent", 
+                    choices=["question", "command", "feedback", "complaint"])
+```
+
+Under the hood, `select` uses the log-probabilities of each choice's token sequence to pick the most likely option without generating tokens one by one. For N choices of average length L, this reduces from O(N*L) sequential decode steps to a single batched forward pass that evaluates all choices simultaneously.
+
+The implementation tokenizes each choice, runs a single forward pass to get logits for the next position, then follows each choice's token sequence through the model to compute cumulative log-probability. The choice with the highest total log-probability wins. For 4 choices of 3 tokens each, this requires 1 forward pass instead of potentially 12 sequential decode steps.
+
+### Composition: Building Complex Agents
+
+These primitives compose naturally into agent-like patterns:
+
+```python
+@sgl.function
+def react_agent(s, task, tools, max_steps=5):
+    s += f"Task: {task}\n"
+    s += f"Available tools: {', '.join(tools)}\n\n"
+    
+    for step in range(max_steps):
+        # Decide action
+        s += f"Step {step + 1}:\n"
+        s += "Thought: "
+        s += sgl.gen("thought", max_tokens=150, stop="\n")
+        
+        # Select tool or finish
+        s += "\nAction: "
+        action = sgl.select("action", choices=tools + ["finish"])
+        s += action
+        
+        if action == "finish":
+            s += "\nFinal Answer: "
+            s += sgl.gen("answer", max_tokens=200)
+            break
+        
+        # Generate structured tool input
+        s += "\nAction Input: "
+        s += sgl.gen("input", max_tokens=100, 
+                     regex=r'\{[^}]+\}')  # Must be valid JSON
+        
+        # Simulate tool response (in production, call actual tool)
+        s += "\nObservation: [tool result]\n\n"
+```
+
+This entire agent loop runs as a single SGLang program. The KV cache grows incrementally across steps (no re-prefill between steps), structured constraints ensure tool inputs are valid JSON, and the select primitive efficiently picks tools without wasteful generation.
+
+### Batch Execution: Processing Many Inputs
+
+SGLang programs can be batched across multiple inputs, sharing the compiled program structure:
+
+```python
+@sgl.function
+def extract_entities(s, text):
+    s += "Extract all named entities from the following text.\n"
+    s += f"Text: {text}\n"
+    s += "Entities (JSON array):\n"
+    s += sgl.gen("entities", max_tokens=200,
+                 regex=r'\[("([^"]+)"(, )?)*\]')
+
+# Process 1000 texts in one batch
+# SGLang automatically:
+# 1. Shares the instruction prefix across all 1000 requests
+# 2. Compiles the regex FSA once
+# 3. Schedules based on cache locality
+texts = load_texts()  # 1000 documents
+results = extract_entities.run_batch(
+    [{"text": t} for t in texts],
+    num_threads=64,
+    progress_bar=True
+)
+```
+
+---
+
+## Performance Architecture
+
+### Why SGLang Is Fast: The Full Picture
+
+SGLang's performance advantage comes from the interaction of multiple optimizations, not any single feature:
+
+```
+                    +---------------------------------------------+
+                    |         SGLang Performance Stack             |
+                    +---------------------------------------------+
+                    |  Programming Model (fork/join/select)        |
+                    |  -> Reduces total generation steps           |
+                    +---------------------------------------------+
+                    |  Jump-Forward Optimization                   |
+                    |  -> Skips deterministic tokens               |
+                    +---------------------------------------------+
+                    |  Batched FSA Evaluation (GPU)                |
+                    |  -> Constraint checking at GPU speed         |
+                    +---------------------------------------------+
+                    |  RadixAttention (tree cache)                 |
+                    |  -> Eliminates redundant prefill             |
+                    +---------------------------------------------+
+                    |  Continuous Batching + PagedAttention        |
+                    |  -> Standard serving optimizations           |
+                    +---------------------------------------------+
+```
+
+Each layer multiplies the effect of the layers below it. RadixAttention reduces prefill work. Jump-forward reduces decode steps. Batched FSA reduces per-step overhead. The programming model reduces the total number of separate requests.
+
+### Benchmark: Structured Output Workloads
+
+For workloads that require JSON/structured output (increasingly common with tool-calling agents), SGLang shows dramatic advantages:
+
+**Agent tool-calling benchmark** (Llama-2 70B, 8xA100):
+- 1000 requests, each requiring 2-4 tool calls with JSON-formatted arguments
+- All requests share the same 1500-token system prompt
+
+| Engine | Throughput (req/s) | Median latency (ms) | P99 latency (ms) |
+|--------|-------------------|---------------------|-------------------|
+| vLLM (no constraints) | 42 | 890 | 2,100 |
+| vLLM + outlines | 28 | 1,340 | 3,200 |
+| TGI + grammar | 31 | 1,210 | 2,900 |
+| SGLang | 186 | 320 | 780 |
+
+The 4.4x throughput advantage over vLLM (without constraints) and 6.6x over vLLM+outlines comes from:
+- RadixAttention reuses the 1500-token system prompt across all 1000 requests (saves 1.5M prefill tokens).
+- Jump-forward skips approximately 30% of decode steps (JSON delimiters, field names).
+- Fork/join executes multiple tool calls without re-sending the conversation prefix.
+
+### Benchmark: Prefix-Heavy Workloads
+
+For RAG and chatbot workloads where many requests share long prefixes:
+
+**RAG benchmark** (Mixtral 8x7B, 4xA100):
+- 500 queries, each retrieving 3 documents (avg 800 tokens each)
+- 60% of documents are shared across queries (realistic for popular topics)
+
+| Engine | Throughput (req/s) | Cache hit rate | GPU memory used |
+|--------|-------------------|----------------|-----------------|
+| vLLM (no APC) | 38 | 0% | 76 GB |
+| vLLM (APC enabled) | 52 | 41% | 68 GB |
+| SGLang | 124 | 78% | 54 GB |
+
+SGLang achieves higher cache hit rates because the radix tree matches partial prefixes that vLLM's block-aligned hashing misses. The memory savings compound: less memory spent on duplicate KV cache entries means more memory available for larger batches, which further increases throughput.
+
+### Benchmark: Multi-Turn Chat at Scale
+
+**Chatbot benchmark** (Llama-3 8B, single A100):
+- 200 concurrent conversations, average 8 turns each
+- 800-token system prompt shared across all conversations
+- Average user message: 50 tokens, average response: 150 tokens
+
+| Engine | Throughput (turns/s) | Avg TTFT (ms) | Memory efficiency |
+|--------|---------------------|---------------|-------------------|
+| vLLM | 89 | 245 | 1.0x (baseline) |
+| SGLang | 203 | 112 | 1.4x |
+
+The TTFT (time to first token) improvement comes directly from RadixAttention: on turn 8 of a conversation, SGLang only prefills the new user message (50 tokens) because the entire conversation history is already in the radix tree. vLLM with APC gets partial benefit but misses matches when conversation turns do not align with block boundaries.
+
+### Worked Example: RadixAttention Savings for a RAG Pipeline
+
+Consider a production RAG system serving 100 concurrent users. Each query retrieves 3 documents (average 600 tokens each) and generates a response conditioned on those documents plus a 400-token system prompt.
+
+**Without RadixAttention (vLLM, no APC):**
+Each request prefills independently:
+```
+Per request: 400 (system) + 3 * 600 (docs) + 50 (query) = 2,250 tokens prefill
+100 concurrent: 225,000 total prefill tokens
+At 50,000 tokens/s prefill throughput: 4.5 seconds to process batch
+```
+
+**With vLLM APC:**
+System prompt is cached (400 tokens saved per request). Documents are cached only if they align with block boundaries AND were recently accessed in the same block order:
+```
+Per request: 0 (system cached) + ~1,200 (2 of 3 docs partially cached) + 50 (query) = 1,250 tokens
+100 concurrent: 125,000 total prefill tokens (44% reduction)
+```
+
+**With SGLang RadixAttention:**
+The radix tree shares the system prompt AND any document that was recently retrieved by any user, regardless of retrieval order or block alignment. In a typical RAG workload, 60% of retrieved documents are "popular" (shared across users):
+```
+Per request: 0 (system) + 600 (1 unique doc) + 50 (query) = 650 tokens average
+100 concurrent: 65,000 total prefill tokens (71% reduction)
+GPU memory for shared docs: stored once, referenced by tree edges
+```
+
+The 71% reduction in prefill tokens translates directly to:
+- 3.5x higher throughput (same GPU processes 3.5x more requests per second)
+- 60% lower time-to-first-token (less prefill work before generation starts)
+- 40% less GPU memory for KV cache (shared entries stored once)
+
+This advantage grows with the "sharing factor" of the workload. A customer support chatbot where 95% of conversations use the same 2000-token system prompt sees even larger gains. A code completion engine where every request shares a 5000-token repository context sees massive savings.
+
+### SGLang vs. vLLM: Architecture Comparison
+
+Understanding where SGLang differs architecturally from vLLM clarifies when each is the right choice:
+
+| Component | vLLM | SGLang |
+|-----------|------|--------|
+| KV cache management | PagedAttention (paged blocks) | PagedAttention + RadixAttention (tree overlay) |
+| Scheduling | FCFS or priority queue | Cache-aware (LPM policy) |
+| Prefix caching | APC (hash-based, block-aligned) | Radix tree (variable-length, O(log n)) |
+| Structured output | External (outlines, guidance) | Native (compiled FSA, jump-forward) |
+| Multi-step workflows | Multiple API calls | Single program (fork/join/select) |
+| API compatibility | OpenAI-compatible | OpenAI-compatible + native SGLang API |
+| Model support | Broadest (100+ architectures) | Growing (major architectures covered) |
+| Quantization | AWQ, GPTQ, FP8, INT8 | AWQ, GPTQ, FP8 (slightly fewer options) |
+| Speculative decoding | Supported | Supported |
+| LoRA serving | Dynamic LoRA loading | Dynamic LoRA loading |
+
+Both engines build on the same foundation (PagedAttention for memory efficiency, continuous batching for throughput). SGLang adds the radix tree layer and programming model on top. The trade-off is clear: SGLang offers higher performance for structured/prefix-heavy workloads at the cost of slightly narrower model support.
+
+
+---
+
+## Deployment and Operations
+
+### Installation and Basic Serving
+
+```bash
+# Install SGLang
+pip install "sglang[all]"
+
+# Launch server (OpenAI-compatible API)
+python -m sglang.launch_server \
+    --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+    --port 30000 \
+    --tp 1 \
+    --mem-fraction-static 0.85
+```
+
+SGLang exposes an OpenAI-compatible API, making it a drop-in replacement for vLLM or TGI in most deployments. The structured generation features are accessed via additional parameters:
+
+```python
+import openai
+
+client = openai.Client(base_url="http://localhost:30000/v1")
+
+# Standard completion (works like any OpenAI-compatible server)
+response = client.chat.completions.create(
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
+    messages=[{"role": "user", "content": "Hello"}]
+)
+
+# Structured output via JSON schema
+response = client.chat.completions.create(
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
+    messages=[{"role": "user", "content": "Extract: John is 30, lives in NYC"}],
+    extra_body={
+        "json_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+                "city": {"type": "string"}
+            },
+            "required": ["name", "age", "city"]
+        }
+    }
+)
+```
+
+### Multi-GPU and Tensor Parallelism
+
+```bash
+# Tensor parallelism across 4 GPUs
+python -m sglang.launch_server \
+    --model-path meta-llama/Meta-Llama-3-70B-Instruct \
+    --tp 4 \
+    --port 30000
+
+# Data parallelism (multiple independent replicas)
+python -m sglang.launch_server \
+    --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+    --dp 4 \
+    --port 30000
+
+# Combined: 2 replicas, each using 4 GPUs for tensor parallelism
+python -m sglang.launch_server \
+    --model-path meta-llama/Meta-Llama-3-70B-Instruct \
+    --tp 4 --dp 2 \
+    --port 30000
+```
+
+### Configuration for Production
+
+Key parameters that affect RadixAttention and structured generation performance:
+
+```bash
+python -m sglang.launch_server \
+    --model-path $MODEL \
+    --tp 4 \
+    --mem-fraction-static 0.85 \        # Fraction of GPU memory for KV cache
+    --max-prefill-tokens 16384 \        # Max tokens per prefill batch
+    --schedule-policy lpm \             # Longest Prefix Match scheduling
+    --chunk-prefill-size 4096 \         # Chunked prefill for long prompts
+    --enable-mixed-chunk \              # Mix prefill and decode in same batch
+    --max-running-requests 256           # Concurrency limit
+```
+
+The `--schedule-policy lpm` (Longest Prefix Match) is critical for RadixAttention performance. It tells the scheduler to prioritize requests whose prefixes are already in the radix tree, maximizing cache hit rates. Without this flag, the scheduler uses FCFS (first come, first served), which can evict hot prefixes before similar requests arrive.
+
+### Monitoring RadixAttention Cache Performance
+
+SGLang exposes metrics for monitoring cache effectiveness:
+
+```python
+import requests
+
+# Get runtime metrics
+metrics = requests.get("http://localhost:30000/get_server_info").json()
+
+# Key metrics to monitor:
+# - cache_hit_rate: fraction of prefill tokens served from cache
+# - radix_tree_size: number of nodes in the tree
+# - eviction_count: how often cache entries are evicted
+# - avg_prefix_match_len: average tokens matched per request
+
+# Healthy indicators:
+# cache_hit_rate > 0.6 for chatbot workloads
+# cache_hit_rate > 0.4 for RAG workloads
+# eviction_count should be stable (not growing linearly)
+```
+
+If cache hit rates are below expectations, common causes include:
+- Insufficient `--mem-fraction-static` (not enough memory for the tree)
+- High request diversity (few shared prefixes in the workload)
+- Using FCFS scheduling instead of LPM
+
+---
+
+## When to Choose SGLang
+
+### Ideal Workloads
+
+SGLang provides the strongest advantages for these workload patterns:
+
+**1. Agent/tool-calling systems**. Agents generate structured tool calls (JSON arguments), receive results, and generate more calls. SGLang's combination of structured generation (ensuring valid JSON), RadixAttention (sharing system prompts and conversation history), and fork/join (parallel tool calls) directly targets this pattern. Expected improvement: 5-7x throughput over vLLM+outlines.
+
+**2. High prefix-sharing deployments**. Any scenario where many concurrent requests share long prefixes: chatbots with the same system prompt, RAG systems retrieving from the same document corpus, or batch processing tasks with identical instructions. Expected improvement: 2-3x throughput, 30-50% memory reduction.
+
+**3. Complex generation pipelines**. Workloads that require multiple generation steps (chain-of-thought, self-verification, extract-then-summarize) benefit from SGLang programs that keep KV cache alive across steps. Expected improvement: 2-4x end-to-end latency reduction from eliminated re-prefills.
+
+**4. Structured output at scale**. APIs that must return valid JSON, SQL, or other constrained formats. The jump-forward optimization alone can double throughput for highly structured outputs. Expected improvement: 5-10x for schema-heavy workloads.
+
+**5. Batch inference with shared context**. Processing thousands of inputs with the same instruction template (data extraction, classification, transformation). The combination of RadixAttention (shares the instruction prefix) and batch execution mode makes this dramatically faster than sequential API calls.
+
+### When NOT to Use SGLang
+
+**Simple completion tasks with diverse prompts**. If your workload is "send unique prompt, get text back" with no constraints and minimal prefix sharing, vLLM is simpler to deploy and has a larger ecosystem of integrations. The radix tree adds overhead when there is nothing to share.
+
+**Maximum model architecture coverage**. SGLang supports fewer model architectures than vLLM. If you need to serve a niche model (custom architectures, rare quantization formats), vLLM or HuggingFace TGI are safer choices. Check SGLang's supported model list before committing.
+
+**Latency-optimized single-request serving**. For scenarios where you care about the absolute latency of a single isolated request (not throughput under load), TensorRT-LLM with custom kernels may offer lower per-request latency due to kernel-level optimizations.
+
+**Existing well-tuned vLLM infrastructure**. If you have a production vLLM deployment that meets your SLOs and your workload characteristics do not strongly favor SGLang's features, the migration cost may not justify the improvement. Measure before migrating.
+
+**Extremely long sequences with no sharing**. For workloads dominated by unique 100K+ token contexts (long document summarization with unique documents), the radix tree provides minimal benefit since each request's prefix is unique.
+
+### Decision Framework
+
+```
+Is your workload primarily structured output (JSON, SQL, regex)?
+  YES -> SGLang (5-10x advantage from jump-forward + batched FSA)
+  NO  -> continue
+
+Do many requests share long prefixes (>500 tokens)?
+  YES -> SGLang (2-3x from RadixAttention vs hash-based APC)
+  NO  -> continue
+
+Do you need multi-step generation (agent loops, chain-of-thought)?
+  YES -> SGLang (programs keep KV cache alive across steps)
+  NO  -> continue
+
+Is it simple text completion with diverse prompts?
+  YES -> vLLM (simpler deployment, broader model support)
+
+Do you need maximum single-request latency?
+  YES -> TensorRT-LLM (custom CUDA kernels for every op)
+```
+
+---
+
+## Mental Model
+
+Think of the serving engine landscape in terms of what each engine optimizes:
+
+- **vLLM** optimizes *memory efficiency* (PagedAttention) and *deployment simplicity* (broad model support, OpenAI API compatibility). It answers: "How do I serve any model without running out of GPU memory?"
+- **TensorRT-LLM** optimizes *kernel performance* (custom CUDA kernels for every operation, maximum single-request speed). It answers: "How do I make each individual inference call as fast as physically possible?"
+- **SGLang** optimizes *computation reuse* (RadixAttention eliminates redundant prefill) and *generation programs* (structured output, multi-step workflows, fork/join patterns). It answers: "How do I avoid doing the same work twice, and how do I express complex generation patterns efficiently?"
+
+SGLang is a programming language for LLM inference, not just a serving engine. Where vLLM gives you an API endpoint and TensorRT-LLM gives you optimized kernels, SGLang gives you a way to express what you want the model to produce and how different generation steps relate to each other. The engine then optimizes the entire program, not just individual requests.
+
+As workloads shift from simple chat completion toward agentic patterns (tool calling, structured output, multi-step reasoning), the programming model becomes the bottleneck. An engine that understands the structure of your workload can eliminate redundant computation that request-level optimizations cannot see. This is why SGLang's throughput advantage grows with workload complexity: the more structure in your generation pattern, the more the engine can optimize.
+
+The trajectory is clear: today's agent frameworks make multiple independent API calls per user request. Tomorrow's frameworks will express entire agent programs as optimizable computation graphs. SGLang is building that future today.
+
+### Ecosystem and Community
+
+SGLang is developed at UC Berkeley's Sky Computing Lab, the same group that produced vLLM, Vicuna, and Chatbot Arena. The project has seen rapid adoption since its ICLR 2024 oral presentation:
+
+- Used internally by LMSYS to power Chatbot Arena's multi-model inference (serving 20+ models simultaneously with shared infrastructure).
+- Adopted by several startups building agent platforms where structured output reliability is critical.
+- Growing contributor community with bi-weekly releases and active Discord.
+- Integration with major model providers: supports Llama, Mistral, Qwen, Gemma, and other popular architectures.
+
+The project's roadmap focuses on three areas: (1) expanding model architecture support to match vLLM's breadth, (2) deeper integration with agent frameworks (LangChain, LlamaIndex, DSPy), and (3) multi-node serving with distributed radix trees for cluster-scale prefix sharing.
+
+
+---
+
+## References
+
+1. Zheng, L., Yin, L., Xie, Z., et al. "SGLang: Efficient Execution of Structured Language Model Programs." arXiv:2312.07104, 2023.
+2. Zheng, L., et al. "Efficiently Programming Large Language Models using SGLang." ICLR 2024 (oral presentation).
+3. SGLang GitHub repository: https://github.com/sgl-project/sglang
+4. RadixAttention: described in SGLang paper Section 3.1, extending classical radix tree data structures to KV cache management.
+5. Willard, B., Louf, R. "Efficient Guided Generation for Large Language Models." arXiv:2307.09702, 2023. (Outlines framework, comparison baseline for structured generation.)
+6. Kwon, W., et al. "Efficient Memory Management for Large Language Model Serving with PagedAttention." SOSP 2023. (vLLM, the baseline system SGLang builds upon.)
+7. Zheng, L., et al. "Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena." NeurIPS 2023. (LMSYS Chatbot Arena, built using SGLang for efficient multi-model inference.)

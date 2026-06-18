@@ -1,4 +1,4 @@
-# Module 06.2: Mixture-of-Experts Inference: Serving Giant Models at Dense-Model Cost
+# 6.2 Mixture-of-Experts Inference
 
 From Module 06.1, you know tensor parallelism splits each layer's weight matrices across GPUs so that a single operation (matrix multiply, layer norm) executes in parallel. Every GPU participates in every token's computation. Mixture-of-Experts (MoE) adds an entirely new dimension to the parallelism story: not every GPU needs to compute every token. Instead, a learned router sends each token to a small subset of "expert" sub-networks, and only those experts fire. The result is a model with 10-100x more total parameters than it activates per token, achieving the capacity of a dense giant at the inference cost of a much smaller model.
 

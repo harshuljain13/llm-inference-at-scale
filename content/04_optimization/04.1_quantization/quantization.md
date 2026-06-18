@@ -1,4 +1,4 @@
-# Module 3: Optimization Techniques
+# 4.1 Quantization
 
 > Every optimization in LLM inference attacks the same fundamental problem: you're reading 16 GB of weights to generate one token. The question is always: how do we read fewer bytes, or get more tokens per byte read?
 
@@ -15,6 +15,13 @@ By the end of this module, you will:
 - Make informed optimization decisions based on your specific workload characteristics
 
 ---
+
+
+> **Where this fits:** From Module 00.0, you know model weights are stored in FP16 (2 bytes per parameter, 16 GB for 8B). From Module 01.1, you know memory bandwidth limits decode speed. Quantization attacks both: fewer bytes means the model fits on fewer GPUs AND reads faster from HBM. This module covers the full optimization toolkit: quantization, PagedAttention, continuous batching, speculative decoding, and chunked prefill.
+
+---
+
+![Quantization Model Sizes](images/quantization_sizes.png)
 
 ## The Optimization Landscape
 
@@ -40,7 +47,7 @@ Before diving into techniques, let's understand what we're optimizing against:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #1: Most optimizations attack memory bandwidth because decode is memory-bound.** Quantization, batching, and tensor parallelism all reduce the bytes-per-token ratio. PagedAttention attacks memory capacity. FlashAttention attacks both bandwidth (less HBM traffic) and capacity (no N×N matrix).
+The dominant theme across these optimizations is that most of them attack memory bandwidth, because the decode phase is fundamentally memory-bound. Quantization, batching, and tensor parallelism all reduce the bytes-per-token ratio. PagedAttention targets memory capacity instead. FlashAttention is unique in that it attacks both bandwidth (less HBM traffic) and capacity (no materialized N×N attention matrix).
 
 ---
 
@@ -82,11 +89,11 @@ print(f"Quantized size: {q_weights.numel() * 1 / 1e6:.1f} MB (INT8)")
 print(f"Scale factor: {scale:.6f}")
 ```
 
-**Insight #2: Quantization error comes from rounding, and rounding error is proportional to the scale factor.** If your weights have outliers (large max values), the scale factor is large, and quantization error is high for all weights. This is why outlier handling is critical.
+The critical point here is that quantization error comes from rounding, and rounding error is proportional to the scale factor. If your weight tensor contains outliers (large maximum values), the scale factor must accommodate them, which increases rounding error for every other weight in the tensor. This is precisely why outlier handling becomes the central challenge of practical quantization.
 
 ### The Outlier Problem
 
-Here's what most quantization tutorials don't tell you:
+Understanding the scale factor's role reveals the next challenge. LLM weight matrices are not uniformly distributed: they contain rare but extreme outlier values that disproportionately affect quantization quality. Here is what most quantization tutorials fail to explain:
 
 ```python
 # LLM weights have outliers that ruin naive quantization
@@ -104,11 +111,11 @@ max_val = layer_weights.abs().max().item()  # ~0.5 (50x the std!)
 # We've lost the signal entirely!
 ```
 
-**Insight #3: A single outlier can destroy quantization quality for an entire tensor.** If one weight is 0.5 and most are 0.01, the scale factor is set by the outlier, and small weights round to zero.
+This example illustrates a devastating failure mode: a single outlier can destroy quantization quality for an entire tensor. When one weight sits at 0.5 while most cluster around 0.01, the scale factor is dictated by that outlier. The typical weights, divided by the large scale factor, round to zero and lose their signal entirely.
 
 ### How AWQ Solves the Outlier Problem
 
-AWQ (Activation-aware Weight Quantization) observes that not all weights are equally important. Weights that multiply large activations matter more.
+Given that outliers destroy naive quantization, researchers developed methods that handle them gracefully. AWQ (Activation-aware Weight Quantization) takes an elegant approach: instead of treating all weights equally, it observes that weights connected to frequently-activated channels matter more than those connected to rarely-activated ones. Weights that multiply large activations matter more.
 
 ```python
 # AWQ's key insight: weight importance = weight × typical activation magnitude
@@ -134,11 +141,11 @@ def awq_quantize(weights, activations_sample):
     return q_weights, scale, importance
 ```
 
-**Insight #4: AWQ doesn't remove outliers—it makes important weights relatively larger so they survive quantization.** The math works out: if a weight is 10× more important, scaling it up by 10× means its quantization error is 10× less impactful on the output.
+AWQ does not remove outliers. Instead, it makes important weights relatively larger so they survive the quantization rounding step. The math is elegant: if a weight is 10× more important (because it multiplies a large activation), scaling it up by 10× before quantization means its quantization error becomes 10× less impactful on the final output.
 
 ### GPTQ: A Different Approach
 
-GPTQ (Generative Pre-trained Transformer Quantization) uses a different strategy: quantize weights one at a time, and adjust remaining weights to compensate for quantization error.
+While AWQ rescales weights before quantization, GPTQ (Generative Pre-trained Transformer Quantization) takes an entirely different philosophical approach. Rather than preventing quantization errors, GPTQ compensates for them after the fact by adjusting weights that have not yet been quantized: quantize weights one at a time, and adjust remaining weights to compensate for quantization error.
 
 ```python
 # GPTQ's key insight: compensate for quantization error in remaining weights
@@ -164,7 +171,7 @@ def gptq_quantize_column(W, H_inv, col_idx):
     return q_col
 ```
 
-**Insight #5: GPTQ achieves better quality than naive quantization by using the remaining unquantized weights to compensate for errors.** It's like a relay race—each runner (weight) adjusts their pace to make up for the previous runner's mistakes.
+GPTQ achieves better quality than naive quantization by exploiting a key property: when you quantize weights sequentially, you can adjust the remaining unquantized weights to compensate for accumulated errors. Each weight, as it gets quantized, passes its error forward for the next weights to absorb. The result is that total output error remains small even though individual weights have been aggressively rounded.
 
 ### Quantization Quality Comparison
 
@@ -196,7 +203,7 @@ Let's be precise about quality loss:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #6: The gap between AWQ and naive quantization is larger than the gap between FP16 and AWQ.** Quantization method matters more than bit width. A well-quantized 4-bit model beats a poorly-quantized 8-bit model.
+The most striking pattern in this table is that the gap between AWQ and naive quantization (RTN) at 4-bit is far larger than the gap between FP16 and AWQ. This means quantization method matters more than bit width. A well-quantized 4-bit model (AWQ, perplexity 5.60) handily beats a poorly-quantized 8-bit model if naive methods were used. Always choose a sophisticated quantization algorithm over simply reducing precision.
 
 ### FP8: The H100 Sweet Spot
 
@@ -219,7 +226,7 @@ Why FP8 is special:
 4. Quality nearly identical to FP16
 ```
 
-**Insight #7: FP8 on H100 gives you 2× memory reduction with essentially zero quality loss and native hardware acceleration.** If you're on H100, FP8 should be your default, not FP16.
+For practitioners with H100 hardware, FP8 is the clear default choice. It provides 2× memory reduction with essentially zero quality loss (perplexity delta of 0.01) and benefits from native hardware acceleration with no dequantization overhead. If you have H100s, there is no reason to serve in FP16.
 
 ### KV Cache Quantization: The Forgotten Optimization
 
@@ -242,7 +249,7 @@ kv_cache_fp8 = 32 * 256   # MB × batch = 8 GB (with KV quantization)
 # KV quantization saves 40% more memory!
 ```
 
-**Insight #8: At high batch sizes, KV cache dominates memory. Quantizing KV cache can save more memory than quantizing weights.** vLLM supports FP8 KV cache with `--kv-cache-dtype fp8`.
+At high batch sizes, KV cache memory eclipses weight memory entirely. In the example above, KV cache consumes 16 GB versus 4 GB for INT4 weights. Quantizing the KV cache from FP16 to FP8 saves another 8 GB, a larger absolute saving than weight quantization provided. vLLM supports FP8 KV cache via `--kv-cache-dtype fp8`.
 
 The catch: KV cache quantization has a larger quality impact than weight quantization because it affects attention patterns directly. Use with caution for quality-sensitive applications.
 
@@ -284,7 +291,7 @@ The key insight: KV cache values have a different distribution than model weight
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #8a: TurboQuant demonstrates that KV cache quantization doesn't have to trade quality for memory.** With structure-aware quantization, 3-bit KV cache is essentially lossless. This is training-free and already integrated in vLLM.
+TurboQuant demonstrates a surprising result: KV cache quantization does not have to trade quality for memory. By exploiting the structured, per-head distribution of KV values, 3-bit quantization achieves accuracy within 0.05% of FP16, essentially lossless. This requires no retraining and is already integrated in vLLM.
 
 ```python
 # vLLM integration (available in vLLM 0.8+)
@@ -330,7 +337,7 @@ Traditional allocation:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #9: Traditional KV cache allocation wastes 60-80% of GPU memory.** This directly limits your batch size and throughput.
+The waste is staggering: traditional KV cache allocation discards 60-80% of allocated GPU memory on padding that will never be used. This directly limits batch size and throughput, because memory consumed by padding cannot serve additional requests.
 
 ### How PagedAttention Works
 
@@ -405,7 +412,7 @@ for bs in [1, 8, 16, 32, 64]:
 # Block size 64: 20.2% fragmentation, 25.8 tokens wasted/seq
 ```
 
-**Insight #10: Smaller blocks = less fragmentation but more kernel overhead. vLLM defaults to 16 tokens/block as a good tradeoff.** For workloads with many short sequences, consider smaller blocks. For long-context workloads, larger blocks are fine.
+The tradeoff is clear: smaller blocks reduce fragmentation but increase kernel overhead from managing more block table entries. vLLM defaults to 16 tokens per block, which provides a balanced tradeoff for typical workloads. If your traffic skews toward many short sequences, consider smaller blocks. For long-context workloads where sequences are thousands of tokens, larger blocks add negligible percentage waste.
 
 ### Prefix Caching: PagedAttention's Killer Feature
 
@@ -439,11 +446,11 @@ PagedAttention enables prefix caching—sharing KV cache blocks across requests 
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #11: Prefix caching is a free win for any workload with repeated prompts.** RAG applications, chatbots with system prompts, and few-shot learning all benefit. Enable with `--enable-prefix-caching` in vLLM.
+Prefix caching is a free performance win for any workload where prompts share common prefixes. RAG applications (shared retrieval context), chatbots (system prompts), and few-shot learning (shared examples) all benefit substantially. Enable it with `--enable-prefix-caching` in vLLM.
 
 ### Copy-on-Write for Beam Search
 
-PagedAttention also enables efficient beam search through copy-on-write:
+Beyond memory efficiency and prefix sharing, PagedAttention's block-based architecture enables a third optimization: copy-on-write semantics for beam search. When multiple beams share a common prefix, they can reference the same physical blocks until they diverge:
 
 ```python
 # Beam search without PagedAttention:
@@ -466,7 +473,7 @@ PagedAttention also enables efficient beam search through copy-on-write:
 
 ### The Static Batching Problem
 
-Static batching waits for a batch to fill, processes it, then waits for the next batch:
+To understand why continuous batching is essential, we first need to see the failure mode it replaces. Static batching collects a fixed number of requests, processes them as a unit, and only begins the next batch after every request in the current batch has finished:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -535,7 +542,7 @@ Continuous batching makes scheduling decisions at each decode step:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #12: Continuous batching can improve throughput by 2-3× over static batching for variable-length outputs.** The improvement is largest when output lengths vary significantly.
+Continuous batching delivers 2-3× throughput improvement over static batching for workloads with variable-length outputs. The improvement is largest when output lengths vary significantly across requests, because static batching forces all requests to wait for the slowest one in the batch.
 
 ### The Scheduler's Decision Loop
 
@@ -581,7 +588,7 @@ class ContinuousBatchingScheduler:
         return batch
 ```
 
-**Insight #13: The scheduler's job is to maximize GPU utilization while respecting memory constraints.** The key parameters are `max_num_seqs` (concurrency limit) and `max_batch_tokens` (memory limit per step).
+The scheduler's core objective is maximizing GPU utilization while respecting memory constraints. Two parameters control this balance: `max_num_seqs` sets the concurrency limit (how many requests can generate simultaneously), and `max_batch_tokens` sets the memory budget per iteration step (how many tokens can be processed in one forward pass).
 
 ---
 
@@ -610,7 +617,7 @@ Speculative decode (4 tokens, 75% acceptance):
 Speedup: 64 GB / 36 GB = 1.8×
 ```
 
-**Insight #14: Speculative decoding amortizes the weight read across multiple tokens.** It's like batching, but across time instead of across sequences.
+Speculative decoding amortizes the expensive weight read across multiple tokens. Where batching amortizes across sequences (one weight read serves N requests simultaneously), speculative decoding amortizes across time (one verification pass confirms K tokens that would otherwise require K separate forward passes).
 
 ### The Math of Speculative Decoding
 
@@ -665,7 +672,7 @@ for acceptance in [0.5, 0.7, 0.85, 0.95]:
 # Acceptance 95%: 3.04× speedup
 ```
 
-**Insight #15: Speculative decoding speedup is roughly `1 + acceptance_rate × num_speculative_tokens`.** With 4 speculative tokens and 80% acceptance, expect ~4× fewer target model forward passes.
+The speedup formula is approximately `1 + acceptance_rate × num_speculative_tokens`. With 4 speculative tokens and 80% acceptance, you get roughly 4× fewer target model forward passes. The acceptance rate depends heavily on how well the draft model approximates the target for your specific domain.
 
 ### When Speculative Decoding Hurts
 
@@ -698,7 +705,7 @@ Speculative decoding isn't always beneficial:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #16: Speculative decoding and batching are substitutes, not complements.** At batch=32, you're already reading weights once for 32 tokens. Speculative decoding adds overhead without proportional benefit.
+A crucial architectural insight: speculative decoding and batching are substitutes, not complements. They solve the same fundamental problem (amortizing weight reads over more tokens). At batch=32, you are already reading weights once for 32 tokens. Adding speculative decoding on top introduces draft model overhead without proportional benefit because the memory bandwidth is already well-utilized.
 
 ### Speculative Decoding Variants
 
@@ -776,7 +783,7 @@ llm_prompt = LLM(
 
 ### The Long Prompt Problem
 
-Without chunked prefill, a long prompt blocks all decode operations:
+Even with continuous batching, a subtle starvation problem remains. When a new request arrives with a very long prompt (8K+ tokens), its prefill computation dominates the GPU for hundreds of milliseconds, blocking all decode operations for existing requests:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -816,7 +823,7 @@ Without chunked prefill, a long prompt blocks all decode operations:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #17: Chunked prefill trades slightly higher TTFT for the new request to prevent latency spikes for existing requests.** This is almost always the right tradeoff in production.
+Chunked prefill trades slightly higher time-to-first-token (TTFT) for the new request in exchange for preventing latency spikes on all existing requests. In production serving where consistent user experience matters, this is almost always the correct tradeoff. A single user waiting 50ms longer for their first token is far better than 10 users experiencing a 400ms stream freeze.
 
 ### Chunked Prefill Configuration
 

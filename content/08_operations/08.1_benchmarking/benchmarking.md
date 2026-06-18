@@ -1,4 +1,4 @@
-# Module 7: Measurement and Operations
+# 8.1 Benchmarking and Metrics
 
 > Benchmarking, monitoring, and troubleshooting LLM inference systems
 

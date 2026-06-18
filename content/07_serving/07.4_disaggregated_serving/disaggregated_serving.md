@@ -1,4 +1,4 @@
-# Module 13: Advanced Disaggregated Serving
+# 7.4 Disaggregated Serving
 
 > Deep dive into disaggregated prefill/decode architectures, production deployments with llm-d and Ray Serve, serverless LLM inference, and cold start mitigation
 

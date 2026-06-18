@@ -1,4 +1,4 @@
-# Module 0.2: Why LLM Inference is Different
+# 0.2 Why LLM Inference is Different
 
 > You now know what a transformer looks like inside (Module 0.0) and how inference works — tokenization, prefill, decode, KV cache (Module 0.1). This module answers: **why is all of this so expensive?**
 

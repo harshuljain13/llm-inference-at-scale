@@ -188,6 +188,7 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 | 4.3 | [Continuous Batching](content/04_optimization/04.3_continuous_batching/continuous_batching.md) | Dynamic batch scheduling |
 | 4.4 | [Speculative Decoding](content/04_optimization/04.4_speculative_decoding/speculative_decoding.md) | Draft-verify, EAGLE, Medusa |
 | 4.5 | [Chunked Prefill](content/04_optimization/04.5_chunked_prefill/chunked_prefill.md) | Splitting prefill to reduce decode latency |
+| 4.6 | [Inference-Time Compute](content/04_optimization/04.6_inference_time_compute/inference_time_compute.md) | Test-time scaling, reasoning models (o1/R1), budget-aware inference |
 
 **Ch 05 — Inference Engines: Choosing vLLM, SGLang, or TRT-LLM**
 
@@ -196,6 +197,7 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 | 5.1 | [vLLM](content/05_engines/05.1_vllm/vllm.md) | PagedAttention engine, production tuning |
 | 5.2 | [SGLang](content/05_engines/05.2_sglang/sglang.md) | RadixAttention, structured generation |
 | 5.3 | [TensorRT-LLM](content/05_engines/05.3_tensorrt_llm/tensorrt_llm.md) | NVIDIA compiled runtime |
+| 5.4 | [NVIDIA Dynamo](content/05_engines/05.4_nvidia_dynamo/nvidia_dynamo.md) | Distributed inference orchestration, NIXL, disaggregated P/D |
 
 **Ch 06 — Parallelism: Fitting Models That Don't Fit on One GPU**
 
@@ -221,6 +223,7 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 | 7.4 | [Disaggregated Serving](content/07_serving/07.4_disaggregated_serving/disaggregated_serving.md) | Prefill/decode separation |
 | 7.5 | [Cold Start](content/07_serving/07.5_cold_start/cold_start.md) | Model loading latency mitigation |
 | 7.6 | [Cache-Aware Routing](content/07_serving/07.6_cache_aware_routing/cache_aware_routing.md) | Prefix routing, semantic caching, session affinity |
+| 7.7 | [Kubernetes Inference Infrastructure](content/07_serving/07.7_kubernetes_inference_infrastructure/kubernetes_inference_infrastructure.md) | KAI Scheduler, DRA, Gateway API, Envoy AI Gateway, llm-d |
 
 **Ch 08 — Operations: The Metrics That Actually Predict Outages**
 
@@ -231,6 +234,7 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 | 8.3 | [Edge Deployment](content/08_operations/08.3_edge_deployment/edge_deployment.md) | llama.cpp, GGUF, mobile inference |
 | 8.4 | [Inference Metrics & Goodput](content/08_operations/08.4_inference_metrics/inference_metrics.md) | SLOs, percentiles, monitoring, cost |
 | 8.5 | [Multi-Region KV Locality](content/08_operations/08.5_multi_region_kv_locality/multi_region_kv_locality.md) | RDMA, KV transfer, DistServe, Mooncake |
+| 8.6 | [Custom Silicon](content/08_operations/08.6_custom_silicon/custom_silicon.md) | Groq LPU, Cerebras WSE-3, AWS Trainium, beyond GPUs |
 
 **Ch 09 — Production Stories: How Meta and Databricks Run at Scale**
 

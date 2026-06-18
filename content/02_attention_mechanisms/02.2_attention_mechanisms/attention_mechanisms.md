@@ -10,6 +10,9 @@ What Module 02.1 did not explain is *why* Llama uses 8 KV heads instead of 32, o
 
 ---
 
+
+![Attention Variants Memory Comparison](images/attention_variants_memory.png)
+
 ## Multi-Head Attention (MHA): The Original Design
 
 Multi-Head Attention, introduced in "Attention Is All You Need" (Vaswani et al., 2017), gives every attention head its own independent Key and Value projections. If your model has `n_heads` query heads, it also has `n_heads` KV heads. Each head independently attends to different aspects of the input: one head might track syntactic relationships, another semantic similarity, another positional proximity.

@@ -1,4 +1,4 @@
-# Module 1: Transformer Inference Mechanics
+# 1.3 FlashAttention
 
 > The difference between understanding transformers and _really_ understanding them is knowing exactly which bytes move where, and why that determines everything about your inference costs.
 
@@ -9,7 +9,7 @@
 By the end of this module, you will:
 
 - Trace tensor shapes through every operation and explain _why_ each shape is what it is
-- Understand the KV cache at the byte level—not just "it caches K and V" but exactly what's stored and why
+- Understand the KV cache at the byte level, not just "it caches K and V" but exactly what's stored and why
 - Calculate KV cache memory requirements from first principles (and know when the formulas lie)
 - Explain why GQA exists, what problem it solves, and the exact tradeoff it makes
 - Understand the prefill/decode split at a level where you can predict which phase will bottleneck
@@ -43,15 +43,19 @@ Time to compute = 0.05 ms
 The GPU spends 99.4% of decode time waiting for memory.
 ```
 
-This is why everything in LLM inference optimization is about memory—not compute.
+This is why everything in LLM inference optimization is about memory, not compute.
 
 ---
 
 ## The Token Generation Pipeline: A Byte-Level View
 
-Let's trace what actually happens when you generate one token. Not the conceptual flow—the actual bytes.
+Understanding the end-to-end token generation pipeline at the byte level is essential for identifying where latency actually lives. Most optimization effort is wasted on operations that account for less than 1% of inference time. By tracing the exact data movement through each stage, you can immediately see which operations dominate and why.
+
+Let's trace what actually happens when you generate one token. Not the conceptual flow, but the actual bytes.
 
 ### Step 1: Tokenization (CPU, negligible)
+
+Tokenization converts raw text into integer token IDs that index into the model's vocabulary. This step runs on CPU and is effectively free compared to GPU operations.
 
 ```python
 # Input: "The capital of France is"
@@ -63,6 +67,8 @@ Let's trace what actually happens when you generate one token. Not the conceptua
 
 ### Step 2: Embedding Lookup (GPU, memory-bound)
 
+The embedding lookup translates token IDs into dense vector representations. Despite the embedding table being over 1 GB, this operation only reads a handful of rows per forward pass.
+
 ```python
 # Embedding table: [vocab_size, hidden_dim] = [128256, 4096]
 # Size: 128256 × 4096 × 2 bytes = 1.05 GB
@@ -70,41 +76,19 @@ Let's trace what actually happens when you generate one token. Not the conceptua
 # Operation: Gather 5 rows from the table
 # Output: [5, 4096] = 40 KB
 
-# This is a pure memory operation—no compute.
+# This is a pure memory operation, no compute.
 # You read 5 × 4096 × 2 = 40 KB from a 1 GB table.
 ```
 
-**Insight #1: The embedding table is 1 GB but you only ever read tiny slices of it.** This is why embedding tables don't benefit much from quantization—you're not reading the whole thing, just scattered rows. The memory bandwidth cost is the random access pattern, not the table size.
+Notice that the embedding table is 1 GB but you only ever read tiny slices of it. This is why embedding tables don't benefit much from quantization: you're not reading the whole thing, just scattered rows. The memory bandwidth cost comes from the random access pattern, not the table size itself.
 
 ### Step 3: The Transformer Block (where the money is)
 
-This is 95%+ of your inference time. Let's break it down operation by operation.
-
-Let's trace what actually happens when you generate one token. Not the conceptual flow—the actual bytes.
-
-### Step 1: Tokenization (CPU, negligible)
-
-```python
-# Input: "The capital of France is"
-# Output: [464, 3139, 286, 4881, 318]  (5 tokens)
-
-# Memory: 5 × 4 bytes = 20 bytes (int32 token IDs)
-# This is nothing. Tokenization is never your bottleneck.
-```
-
-### Step 2: Embedding Lookup (GPU, memory-bound)
-
-````python
-# Embedding table: [vocab_size, hidden_dim] = [128256, 4096]
-# Size: 128256 × 4096 × 2 bytes = 1.05 GB
-
-# Operation: Gather 5 rows from the table
-# Output: [5, 4096] = 40 KB
-
-# This is a pure memory operation—no compute.
-# You read 5 × 4096 × 2 = 40 KB from a 1 GB table.
+This is 95%+ of your inference time. The transformer block is where the fundamental memory-vs-compute tradeoff plays out at every layer. Let's break it down operation by operation.
 
 #### 3a: RMSNorm (cheap, memory-bound)
+
+RMSNorm is a lightweight normalization applied before attention and MLP sub-layers. It stabilizes training and inference with minimal overhead.
 
 ```python
 # Input: [batch, seq, hidden] = [1, 5, 4096]
@@ -116,11 +100,11 @@ Let's trace what actually happens when you generate one token. Not the conceptua
 # Memory: Read 40 KB input + 8 KB weights, write 40 KB output
 
 # This is so cheap it's essentially free.
-````
+```
 
 #### 3b: Attention Projections (the first big memory read)
 
-This is where things get expensive. You have four projection matrices:
+The attention projections are where the first significant memory reads occur. You have four projection matrices that transform the hidden state into queries, keys, values, and the output. This is where things get expensive.
 
 ```python
 # Llama 3.1 8B uses GQA: 32 query heads, 8 KV heads, 128 dim per head
@@ -134,7 +118,7 @@ Total per layer: 80 MB
 Total for 32 layers: 2.56 GB  # Just the attention projections!
 ```
 
-**Insight #2: The Q and O projections are 4× larger than K and V projections.** This is the GQA tradeoff—you save memory on KV cache but the projection weights are still dominated by Q and O. GQA doesn't reduce model size, only KV cache size.
+The Q and O projections are 4x larger than K and V projections because GQA only reduces the KV head count, not the query head count. You save memory on the KV cache, but the projection weights remain dominated by Q and O. GQA doesn't reduce model size; it only reduces KV cache size.
 
 ```python
 # The actual computation:
@@ -151,6 +135,8 @@ V = V.view(1, 5, 8, 128).transpose(1, 2)   # [1, 8, 5, 128]
 ```
 
 #### 3c: The Attention Computation (where GQA gets interesting)
+
+With GQA, 32 query heads share only 8 KV heads. Understanding exactly how this sharing works is crucial for reasoning about memory efficiency and why GQA achieves near-MHA quality with a fraction of the KV cache.
 
 Here's where most explanations gloss over the details. With GQA, you have 32 query heads but only 8 KV heads. How does that work?
 
@@ -173,13 +159,13 @@ attn_weights = softmax(scores, dim=-1)                  # [1, 32, 5, 5]
 attn_output = attn_weights @ V_expanded                 # [1, 32, 5, 128]
 ```
 
-**Insight #3: The repeat_interleave doesn't actually copy memory in optimized implementations.** FlashAttention and PagedAttention use index arithmetic to avoid the expansion. But conceptually, each query head is attending to the same KV cache—just with different learned query projections.
+In practice, the `repeat_interleave` doesn't actually copy memory in optimized implementations. FlashAttention and PagedAttention use index arithmetic to avoid the expansion entirely. Conceptually, each query head is attending to the same KV cache but with different learned query projections.
 
-**Insight #4: The attention matrix is [seq_len, seq_len].** For a 4096-token context, that's 16M elements per head, 512M elements total. This is why FlashAttention matters—it never materializes this full matrix.
+One more critical point: the attention matrix has shape [seq_len, seq_len]. For a 4096-token context, that's 16M elements per head, 512M elements total across all 32 heads. This is precisely why FlashAttention matters: it never materializes this full matrix in HBM, instead computing it in tiles that fit in SRAM.
 
 #### 3d: The MLP Block (the other half of the parameters)
 
-The MLP is deceptively simple but contains ~2/3 of the model's parameters:
+The MLP block is deceptively simple in structure but contains roughly two-thirds of the model's parameters. While the attention mechanism gets most of the optimization attention, the MLP is where the majority of weight memory actually lives.
 
 ```python
 # Llama uses SwiGLU activation, which means 3 projections instead of 2:
@@ -200,11 +186,13 @@ hidden = silu(gate) * up        # Element-wise, [1, 5, 14336]
 output = hidden @ W_down        # [1, 5, 14336] @ [14336, 4096] → [1, 5, 4096]
 ```
 
-**Insight #5: The intermediate dimension (14336) is 3.5× the hidden dimension (4096).** This ratio is a design choice. Larger intermediate = more capacity but more memory. Llama chose 3.5×; GPT-2 used 4×. This is why MLP dominates model size.
+The intermediate dimension (14336) is 3.5x the hidden dimension (4096). This ratio is a design choice: larger intermediate means more model capacity but more memory. Llama chose 3.5x while GPT-2 used 4x. This is why the MLP dominates model size.
 
-**Insight #6: SwiGLU requires 3 weight matrices instead of 2.** Classic transformers use `relu(x @ W1) @ W2`. SwiGLU uses `silu(x @ W_gate) * (x @ W_up) @ W_down`. The extra matrix is why Llama's MLP is 50% larger than you'd expect from the intermediate dimension alone.
+Furthermore, SwiGLU requires 3 weight matrices instead of 2. Classic transformers use `relu(x @ W1) @ W2`, but SwiGLU uses `silu(x @ W_gate) * (x @ W_up) @ W_down`. The extra matrix is why Llama's MLP is 50% larger than you'd expect from the intermediate dimension alone.
 
 ### Step 4: The LM Head (one more big matrix)
+
+The final step maps the model's hidden representation back to vocabulary space to produce a probability distribution over the next token. This projection is as large as the embedding table.
 
 ```python
 # LM Head: [hidden, vocab] = [4096, 128256]
@@ -212,7 +200,7 @@ output = hidden @ W_down        # [1, 5, 14336] @ [14336, 4096] → [1, 5, 4096]
 
 # This is the same size as the embedding table!
 # In fact, many models tie these weights (share the same matrix).
-# Llama 3.1 does NOT tie weights—it has separate embedding and LM head.
+# Llama 3.1 does NOT tie weights, it has separate embedding and LM head.
 
 logits = final_hidden @ W_lm_head  # [1, 5, 4096] @ [4096, 128256] → [1, 5, 128256]
 
@@ -220,11 +208,13 @@ logits = final_hidden @ W_lm_head  # [1, 5, 4096] @ [4096, 128256] → [1, 5, 12
 next_token_logits = logits[:, -1, :]  # [1, 128256]
 ```
 
-**Insight #7: The LM head is 1 GB but you only use one row of output during generation.** You compute logits for all 128K vocab entries, but you only sample one token. This is unavoidable—you need the full distribution to sample from.
+The LM head is 1 GB but you only use one row of output during generation. You compute logits for all 128K vocab entries, yet you only sample one token. This is unavoidable because you need the full distribution to sample from.
 
 ---
 
 ## The KV Cache: Why It Exists and What It Actually Stores
+
+The KV cache is the single most important data structure in LLM inference. It enables autoregressive generation to run in linear time instead of quadratic time, but at the cost of memory that grows with every generated token. Understanding it at the byte level is essential for capacity planning and optimization.
 
 ### The Problem KV Cache Solves
 
@@ -252,11 +242,11 @@ Token 100: Compute K,V for token 100, read tokens 1-99's K,V from cache
 Total K,V computations: 100 (one per token)
 ```
 
-**The KV cache trades memory for compute: O(N) memory to avoid O(N²) compute.**
+**The KV cache trades memory for compute: O(N) memory to avoid O(N^2) compute.**
 
 ### What's Actually in the KV Cache
 
-Let's be precise. For each layer, you store:
+Let's be precise about what gets stored. For each layer, you store the projected key and value tensors after the linear projections have been applied.
 
 ```python
 # Per layer, per sequence:
@@ -272,11 +262,11 @@ Total per layer: 16 MB
 Total KV cache: 32 × 16 MB = 512 MB per sequence
 ```
 
-**Insight #8: The KV cache stores the _projected_ K and V, not the original hidden states.** You can't reconstruct the hidden states from the KV cache. This is important—if you wanted to branch the generation (beam search), you'd need to copy the KV cache, not recompute from hidden states.
+The KV cache stores the _projected_ K and V, not the original hidden states. You cannot reconstruct the hidden states from the KV cache. This distinction matters for branching generation (beam search): you must copy the KV cache rather than recompute from hidden states.
 
 ### The KV Cache Memory Formula (and when it lies)
 
-The standard formula:
+The standard formula provides a useful approximation:
 
 ```
 KV_cache_bytes = 2 × num_layers × num_kv_heads × head_dim × seq_len × batch_size × dtype_bytes
@@ -293,7 +283,7 @@ kv_cache = 2 × 32 × 8 × 128 × 4096 × 1 × 2
 
 **When the formula lies:**
 
-1. **PagedAttention adds overhead.** vLLM allocates KV cache in blocks (typically 16 tokens). If your sequence is 4097 tokens, you allocate 4112 tokens worth of cache. ~1% overhead for long sequences, more for short ones.
+1. **PagedAttention adds overhead.** vLLM allocates KV cache in blocks (typically 16 tokens). If your sequence is 4097 tokens, you allocate 4112 tokens worth of cache. This is roughly 1% overhead for long sequences, but more significant for short ones.
 
 2. **FP16 KV cache even with INT4 weights.** Most quantized models still use FP16 for KV cache because quantizing KV hurts quality more than quantizing weights. Your "4-bit model" still has 16-bit KV cache.
 
@@ -302,6 +292,8 @@ kv_cache = 2 × 32 × 8 × 128 × 4096 × 1 × 2
 4. **Prefix caching shares memory.** If 10 requests share the same system prompt, vLLM stores one copy of that prefix's KV cache. The formula assumes no sharing.
 
 ### KV Cache Growth Visualization
+
+The following diagram shows how the KV cache grows as tokens are generated. Each decode step appends exactly one row per KV head per layer.
 
 ```
 PREFILL: Process "The capital of France is" (5 tokens)
@@ -332,11 +324,13 @@ After 1000 generated tokens:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Insight #9: KV cache grows linearly with sequence length, but the _rate_ of growth depends on num_kv_heads.** Llama 3.1 8B grows at 128 KB/token. Llama 3.1 70B also grows at 128 KB/token (same 8 KV heads). But GPT-4 (estimated 96 KV heads) would grow at ~1.5 MB/token.
+KV cache grows linearly with sequence length, but the _rate_ of growth depends on num_kv_heads. Llama 3.1 8B grows at 128 KB/token. Llama 3.1 70B also grows at 128 KB/token (same 8 KV heads). But a model with 96 KV heads (like GPT-4 is estimated to have) would grow at roughly 1.5 MB/token, making long-context serving far more expensive.
 
 ---
 
 ## Attention Variants: The Memory-Quality Tradeoff
+
+Recall from the previous section that KV cache is the critical resource constraining batch size and maximum sequence length. The choice of attention variant directly determines how fast that cache grows. This section traces the evolution from MHA to MQA to GQA, showing exactly what tradeoffs each variant makes.
 
 ### Why MQA and GQA Exist
 
@@ -359,12 +353,12 @@ MQA KV cache per token = 2 × num_layers × 1 × head_dim × dtype_bytes
 Same model with MQA:
 = 2 × 96 × 1 × 128 × 2 = 49 KB per token
 
-96× reduction in KV cache!
+96x reduction in KV cache!
 ```
 
-**The problem:** MQA hurts model quality. All those query heads are fighting over one KV representation.
+The problem with MQA is that it hurts model quality. All those query heads are fighting over one KV representation.
 
-**The solution:** Grouped-Query Attention (GQA), introduced in 2023. A middle ground—groups of query heads share KV heads.
+The solution is Grouped-Query Attention (GQA), introduced in 2023. It provides a middle ground where groups of query heads share KV heads.
 
 ### GQA: The Math
 
@@ -378,7 +372,7 @@ Llama 3.1 8B: 32 query heads, 8 KV heads, G=4
 Llama 3.1 70B: 64 query heads, 8 KV heads, G=8
 ```
 
-**Insight #10: Larger models use more aggressive grouping.** Llama 8B uses G=4 (4× KV reduction). Llama 70B uses G=8 (8× KV reduction). The larger model can "afford" more sharing because it has more capacity elsewhere.
+Larger models use more aggressive grouping. Llama 8B uses G=4 (4x KV reduction) while Llama 70B uses G=8 (8x KV reduction). The larger model can "afford" more sharing because it has more capacity elsewhere to compensate.
 
 ### The Quality Impact
 
@@ -393,9 +387,11 @@ Llama 7B       GQA-4       34.9    75.8        0.125× (8× smaller)
 Llama 7B       GQA-8       34.7    75.6        0.0625× (16× smaller)
 ```
 
-**Insight #11: GQA-4 recovers almost all MHA quality while using 8× less KV cache.** The quality loss from MHA→GQA-4 is ~0.3% on MMLU. The memory savings is 8×. This is why every modern model uses GQA.
+GQA-4 recovers almost all MHA quality while using 8x less KV cache. The quality loss from MHA to GQA-4 is approximately 0.3% on MMLU. The memory savings is 8x. This is why every modern model uses GQA.
 
 ### Visualizing the Difference
+
+The following diagrams show how query heads map to KV heads under each attention variant. The key takeaway is that GQA reduces the number of independent KV representations that must be stored, directly shrinking the KV cache.
 
 ```
 MHA (32 query heads, 32 KV heads):
@@ -446,11 +442,11 @@ MQA (32 query heads, 1 KV head):
 
 ## Prefill vs Decode: Two Completely Different Problems
 
-This is the most important section for inference engineering. Prefill and decode have different bottlenecks, different optimization strategies, and increasingly, different hardware.
+This is the most important section for inference engineering. Prefill and decode have different bottlenecks, different optimization strategies, and increasingly, different hardware. Understanding why they differ, as established by the memory access patterns in the previous sections, is what separates a naive deployment from an optimized one.
 
 ### Prefill: Compute-Bound (Usually)
 
-During prefill, you process the entire prompt in one forward pass:
+During prefill, you process the entire prompt in one forward pass. Because you're computing attention over all prompt tokens simultaneously, the matrix multiplications are large enough to saturate the GPU's compute units.
 
 ```python
 # Prefill for 1000-token prompt:
@@ -481,11 +477,11 @@ A100 ridge point: 312 TFLOPS / 2 TB/s = 156 FLOPs/byte
 362 > 156 → Prefill is compute-bound on A100
 ```
 
-**Insight #12: Prefill arithmetic intensity scales with sequence length.** Longer prompts = more compute-bound. A 100-token prompt might be memory-bound; a 10,000-token prompt is definitely compute-bound.
+Prefill arithmetic intensity scales with sequence length. Longer prompts produce more compute per byte of weight read. A 100-token prompt might still be memory-bound, but a 10,000-token prompt is definitively compute-bound.
 
 ### Decode: Memory-Bound (Always)
 
-During decode, you generate one token at a time:
+During decode, you generate one token at a time. The matrix dimensions collapse because the sequence dimension is 1, turning every operation into a matrix-vector multiply that cannot saturate GPU compute.
 
 ```python
 # Decode for 1 new token (with 1000 tokens already in cache):
@@ -514,11 +510,11 @@ Arithmetic intensity: 5.8B / 16.1G = 0.36 FLOPs/byte
 0.36 << 156 → Decode is extremely memory-bound
 ```
 
-**Insight #13: Decode arithmetic intensity is ~1000× lower than prefill.** This is why decode is always memory-bound. You're reading the entire model to generate one token.
+Decode arithmetic intensity is roughly 1000x lower than prefill. This is why decode is always memory-bound: you're reading the entire model just to generate one token. No amount of kernel optimization can change this fundamental ratio.
 
 ### The Batching Insight
 
-Here's where it gets interesting. What if you batch multiple decode requests together?
+Batching multiple decode requests together is the primary lever for improving GPU utilization during decode. By processing multiple sequences simultaneously, you amortize the cost of reading model weights across all of them.
 
 ```python
 # Decode for 32 sequences simultaneously:
@@ -531,7 +527,7 @@ Input: [32, 1, 4096]
 # Still memory-bound, but 25× better than batch=1!
 ```
 
-**Insight #14: Batching amortizes weight reads across sequences.** With batch=32, you read the weights once but do 32× the compute. This is why high-throughput serving uses large batches.
+Batching amortizes weight reads across sequences. With batch=32, you read the weights once but do 32x the compute. This is why high-throughput serving uses large batches.
 
 **But there's a catch:** KV cache scales with batch size. At some point, you run out of memory for KV cache before you can batch enough to become compute-bound.
 
@@ -547,13 +543,15 @@ At batch=117:
 - Still memory-bound! But much better than batch=1.
 ```
 
-**Insight #15: You can never make decode compute-bound through batching alone.** The KV cache grows with batch size, so you hit memory limits before reaching the ridge point. This is the fundamental constraint of LLM inference.
+You can never make decode compute-bound through batching alone. The KV cache grows with batch size, so you hit memory limits before reaching the ridge point. This is the fundamental constraint of LLM inference.
 
 ---
 
 ## The Memory Bandwidth Wall
 
-Let's derive the theoretical maximum decode speed from first principles.
+Everything discussed so far converges on a single limiting factor: memory bandwidth. This section derives the theoretical maximum decode speed from first principles, establishing the hard ceiling that no software optimization can exceed.
+
+Let's derive the theoretical maximum decode speed:
 
 ```
 Llama 3.1 8B on A100 80GB:
@@ -566,7 +564,7 @@ Theoretical max decode speed = 1 token / 8 ms = 125 tokens/sec
 This is a HARD CEILING. No optimization can exceed this.
 ```
 
-**Insight #16: The memory bandwidth wall is model_size / bandwidth.** This is the most important equation in LLM inference:
+The memory bandwidth wall is defined by the equation `model_size / bandwidth`. This is the most important equation in LLM inference:
 
 ```
 max_tokens_per_second = memory_bandwidth / model_size_bytes
@@ -580,21 +578,16 @@ Let's verify with real benchmarks:
 | Llama 70B        | 140 GB      | 2 TB/s  | 14.3 tok/s      | 11-13 tok/s   | 77-91%     |
 | Llama 70B (TP=8) | 17.5 GB/GPU | 16 TB/s | 914 tok/s       | 650-750 tok/s | 71-82%     |
 
-**Insight #17: Real systems achieve 70-90% of theoretical bandwidth.** The gap comes from:
-
-- KV cache reads (not just weights)
-- Kernel launch overhead
-- Memory access patterns (not perfectly sequential)
-- Synchronization in multi-GPU setups
+Real systems achieve 70-90% of theoretical bandwidth. The gap comes from KV cache reads (not just weights), kernel launch overhead, imperfect memory access patterns (not perfectly sequential), and synchronization costs in multi-GPU setups.
 
 ### Breaking the Wall: Your Options
 
-1. **Quantization**: Reduce model size → read fewer bytes
-   - INT8: 2× faster theoretical max
-   - INT4: 4× faster theoretical max
+1. **Quantization**: Reduce model size to read fewer bytes
+   - INT8: 2x faster theoretical max
+   - INT4: 4x faster theoretical max
    - But: quality tradeoff
 
-2. **Tensor Parallelism**: More GPUs → more bandwidth
+2. **Tensor Parallelism**: More GPUs means more aggregate bandwidth
    - TP=8 on A100: 16 TB/s aggregate bandwidth
    - But: communication overhead, diminishing returns
 
@@ -609,7 +602,7 @@ Let's verify with real benchmarks:
 
 ## Putting It All Together: A Complete Example
 
-Let's trace a real inference request end-to-end.
+Having established the individual components and their memory/compute characteristics, let's trace a real inference request end-to-end to see how all the pieces interact in practice.
 
 **Setup:**
 
@@ -671,7 +664,7 @@ Final KV cache: 700 tokens × 128 KB/token = 90 MB
 
 2. **The KV cache is the critical resource.** It determines your max batch size, max sequence length, and memory efficiency.
 
-3. **GQA reduces KV cache 4-8× with minimal quality loss.** This is why every modern model uses it.
+3. **GQA reduces KV cache 4-8x with minimal quality loss.** This is why every modern model uses it.
 
 4. **Prefill is compute-bound, decode is memory-bound.** They need different optimizations (and increasingly, different hardware).
 

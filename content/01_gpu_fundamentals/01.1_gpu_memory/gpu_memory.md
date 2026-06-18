@@ -1,4 +1,4 @@
-# Module 2: GPU and Memory Engineering
+# 1.1 GPU Memory Architecture
 
 > The roofline model is the single most useful mental tool for LLM inference engineering. Once you internalize it, you'll never again wonder "why is my GPU at 30% utilization but inference is slow?"
 

@@ -1,4 +1,4 @@
-# Module 8: AWS Deep Dive
+# 7.2 EKS and KServe
 
 > Deploying LLM inference on AWS: EC2, SageMaker, Inferentia2, and Bedrock
 

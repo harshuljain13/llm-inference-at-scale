@@ -1,4 +1,4 @@
-# Module 9: Structured Output and Guided Decoding
+# 8.2 Structured Output and Guided Decoding
 
 > Constraining LLM outputs for reliable, parseable responses
 

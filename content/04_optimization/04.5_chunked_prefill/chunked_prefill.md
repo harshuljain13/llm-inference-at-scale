@@ -1,4 +1,4 @@
-# Module 3: Optimization Techniques
+# 4.5 Chunked Prefill
 
 > Every optimization in LLM inference attacks the same fundamental problem: you're reading 16 GB of weights to generate one token. The question is always: how do we read fewer bytes, or get more tokens per byte read?
 
@@ -774,6 +774,8 @@ llm_prompt = LLM(
 
 ## Chunked Prefill: Preventing Starvation
 
+Chunked prefill was introduced by Sarathi-Serve [8], which proposed splitting long prefills into fixed-size chunks and piggybacking them with ongoing decode iterations. This eliminates the head-of-line blocking that long prompts cause in continuous batching systems.
+
 ### The Long Prompt Problem
 
 Without chunked prefill, a long prompt blocks all decode operations:
@@ -966,3 +968,4 @@ In Lab 3, you'll compare quantization methods hands-on: measure throughput, late
 5. Cai et al. "Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads" (2024)
 6. Li et al. "EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty" (2024)
 7. Yu et al. "Orca: A Distributed Serving System for Transformer-Based Generative Models" (2022)
+8. Agrawal et al. "Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve" (OSDI 2024, Microsoft Research)

@@ -1,4 +1,4 @@
-# Module 6: Production Serving Architecture
+# 7.1 Ray Serve
 
 > Deploying LLMs in production with Ray Serve, KServe, and llm-d
 

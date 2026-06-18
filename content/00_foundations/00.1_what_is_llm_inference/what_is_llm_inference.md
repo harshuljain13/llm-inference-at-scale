@@ -1,4 +1,4 @@
-# Module 0.1: What is LLM Inference?
+# 0.1 What is LLM Inference
 
 > Now that you understand transformer architecture (Module 0.0), let's see what happens when you actually send a prompt to an LLM and get a response back.
 

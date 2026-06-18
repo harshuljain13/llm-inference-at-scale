@@ -1,4 +1,4 @@
-# Module 11: Advanced KV Cache Engineering
+# 3.2 KV Cache Compression
 
 > The KV cache is the single largest memory consumer in LLM inference at scale. At batch=64 with 8K context, KV cache alone consumes 32 GB on a 70B model—more than the quantized weights. This module covers the 2025-2026 generation of KV-specific optimizations that go far beyond PagedAttention.
 
