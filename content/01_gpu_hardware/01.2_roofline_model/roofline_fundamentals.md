@@ -1,49 +1,88 @@
 # 1.2 The Roofline Model
 
-The roofline model is a performance analysis framework that maps any workload onto a two-dimensional space defined by hardware limits. One axis represents computational throughput (FLOPS). The other represents memory bandwidth (bytes per second). Every workload lands somewhere in this space, and the model tells you which hardware ceiling constrains it. For LLM inference, the roofline model explains why decode is slow, why batching helps, and exactly how much batching you need before compute becomes the bottleneck.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/01_gpu_hardware/01.2_roofline_model/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/01_gpu_hardware/01.2_roofline_model/lab.ipynb)
 
-This chapter derives the roofline from first principles, applies it to matrix operations common in transformers, calculates ridge points for modern GPUs, and proves through worked arithmetic that LLM decode lives deep in the memory-bound regime.
+Every GPU has two speed limits: how fast it can **do math** (compute) and how fast it can **read data** from memory (bandwidth). The roofline model is a simple visual tool that tells you which limit your workload hits.
+
+For LLM inference, the answer is almost always: **decode is limited by memory bandwidth, not compute.** The GPU finishes its math and then waits for the next chunk of data. This module proves that with numbers.
+
+```mermaid
+flowchart LR
+    subgraph GPU["Your GPU has two ceilings"]
+        COMPUTE["Compute ceiling<br>How fast it does math<br>(e.g. 312 TFLOPS on A100)"]
+        BANDWIDTH["Bandwidth ceiling<br>How fast it reads memory<br>(e.g. 2 TB/s on A100)"]
+    end
+    WORKLOAD["Your workload"] -->|"hits one of these"| GPU
+
+    style COMPUTE fill:#dbeafe,stroke:#000,color:#1e293b
+    style BANDWIDTH fill:#ffe4e6,stroke:#000,color:#1e293b
+    style WORKLOAD fill:#f3f4f6,stroke:#000,color:#1e293b
+    style GPU fill:#f3f4f6,stroke:#000,color:#0f172a
+```
+
+The question the roofline answers: **"Is my workload starved for compute or starved for data?"** If it's starved for data (memory-bound), buying a faster GPU won't help. You need more bandwidth or less data to read.
 
 ---
 
 ## What Arithmetic Intensity Means
 
-Arithmetic intensity is the ratio of floating-point operations performed to the number of bytes transferred between compute units and memory. It carries units of FLOPs per byte.
+To know which ceiling you hit, you need one number: **arithmetic intensity (AI)**. It measures how much math you do per byte of data you read.
 
 ```
-Arithmetic Intensity (AI) = Total FLOPs / Total Bytes Transferred
+AI = FLOPs performed / Bytes read from HBM
 ```
 
-This single number characterizes a workload independently of any specific hardware. A workload with AI = 10 performs 10 floating-point operations for every byte it reads from or writes to memory. A workload with AI = 0.5 transfers two bytes for every operation it performs.
+Think of it like a factory:
+- AI = 0.5 means: for every byte that arrives from the warehouse, you do 0.5 operations. The workers are mostly idle, waiting for deliveries. **Memory-bound.**
+- AI = 200 means: for every byte that arrives, you do 200 operations. The warehouse is idle, workers are overwhelmed. **Compute-bound.**
 
-The significance of arithmetic intensity is that it determines which hardware resource limits performance. Hardware offers two resources: compute (measured in FLOPS) and memory bandwidth (measured in bytes/second). If a workload has low arithmetic intensity, it finishes its computations before memory can deliver the next batch of data. The compute units sit idle waiting for bytes. Conversely, if a workload has high arithmetic intensity, memory delivers data faster than compute can process it. The memory bus sits idle waiting for results to be written back.
+The GPU's **ridge point** is the AI where both ceilings are hit simultaneously. Below the ridge → memory-bound. Above → compute-bound. For the A100, the ridge point is about 156 FLOPs/byte.
 
 ### Calculating Arithmetic Intensity for Matrix Multiplication
 
-Matrix multiplication is the dominant operation in transformer inference. Consider multiplying matrix A of shape [M, K] by matrix B of shape [K, N] to produce C of shape [M, N].
+Let's compute AI for the operations you already know from Module 0.3:
 
-FLOPs count: Each element of C requires K multiply-accumulate operations. There are M x N elements in C, giving 2 x M x K x N FLOPs (the factor of 2 accounts for the separate multiply and add).
+**Prefill: Computing Q for 1000 tokens**
 
-Bytes transferred: We must read A (M x K elements) and B (K x N elements) from memory, and write C (M x N elements) back. In FP16, each element is 2 bytes.
+```mermaid
+flowchart LR
+    H["Hidden states [1000 x 4096]<br>read from HBM"] --> MATMUL["H x W_Q<br>2 * 1000 * 4096 * 4096<br>= 33.6B FLOPs"]
+    WQ["W_Q [4096 x 4096]<br>read from HBM (32 MB)"] --> MATMUL
+    MATMUL --> Q["Q [1000 x 4096]<br>written to HBM"]
 
-```
-FLOPs = 2 * M * K * N
-Bytes = 2 * (M*K + K*N + M*N)   [in FP16]
-AI    = (2 * M * K * N) / (2 * (M*K + K*N + M*N))
-      = (M * K * N) / (M*K + K*N + M*N)
-```
-
-For a square matrix where M = K = N = d:
-
-```
-AI = d^3 / (3 * d^2) = d / 3
+    style H fill:#dbeafe,stroke:#000,color:#1e293b
+    style WQ fill:#dcfce7,stroke:#000,color:#1e293b
+    style MATMUL fill:#f3e8ff,stroke:#000,color:#1e293b
+    style Q fill:#fef3c7,stroke:#000,color:#1e293b
 ```
 
-With d = 4096 (typical hidden dimension): AI = 4096 / 3 = 1365 FLOPs/byte. This is extremely compute-bound. Large square matrix multiplications always saturate compute because the cubic growth in operations outpaces the quadratic growth in data movement.
+```
+FLOPs = 2 * 1000 * 4096 * 4096 = 33.6 billion
+Bytes = (1000*4096 + 4096*4096 + 1000*4096) * 2 = 49.5 MB
+AI = 33.6B / 49.5MB = 679 FLOPs/byte → compute-bound
+```
 
-### The Critical Case: Matrix-Vector Multiplication
+**Decode: Computing Q for 1 token**
 
-During LLM decode with batch size 1, the input is a single token embedding, a vector of shape [1, K]. Multiplying by a weight matrix of shape [K, N]:
+```mermaid
+flowchart LR
+    H["Hidden state [1 x 4096]<br>read from HBM (8 KB)"] --> MATVEC["H x W_Q<br>2 * 1 * 4096 * 4096<br>= 33.6M FLOPs"]
+    WQ["W_Q [4096 x 4096]<br>read from HBM (32 MB)"] --> MATVEC
+    MATVEC --> Q["Q [1 x 4096]<br>written to HBM (8 KB)"]
+
+    style H fill:#dcfce7,stroke:#000,color:#1e293b
+    style WQ fill:#ffe4e6,stroke:#000,color:#1e293b
+    style MATVEC fill:#f3e8ff,stroke:#000,color:#1e293b
+    style Q fill:#dcfce7,stroke:#000,color:#1e293b
+```
+
+```
+FLOPs = 2 * 1 * 4096 * 4096 = 33.6 million
+Bytes = (1*4096 + 4096*4096 + 1*4096) * 2 = 32 MB (W_Q dominates!)
+AI = 33.6M / 32MB = 1.05 FLOPs/byte → memory-bound
+```
+
+Same weight matrix W_Q. Same operation. But 1000 tokens (prefill) gives AI=679, while 1 token (decode) gives AI=1. The weight matrix costs 32 MB to read regardless of how many tokens you process.
 
 ```
 FLOPs = 2 * 1 * K * N = 2*K*N
@@ -59,89 +98,58 @@ The weight matrix dominates the byte count. Reading K*N weights dwarfs the input
 
 ### How Batch Size Changes Arithmetic Intensity
 
-With batch size B, the input becomes [B, K] instead of [1, K]. The weight matrix is read once and reused across all B input vectors:
+With batch size B, the weight matrix is read once but used for B inputs. More batching = more math per byte = higher AI:
+
+```mermaid
+flowchart LR
+    B1["Batch=1<br>AI = 1.0"] --> B8["Batch=8<br>AI = 7.9"] --> B32["Batch=32<br>AI = 30.5"] --> B128["Batch=128<br>AI = 107.8"] --> B256["Batch=256<br>AI = 186.2"]
+
+    style B1 fill:#ffe4e6,stroke:#000,color:#1e293b
+    style B8 fill:#ffe4e6,stroke:#000,color:#1e293b
+    style B32 fill:#ffedd5,stroke:#000,color:#1e293b
+    style B128 fill:#fef3c7,stroke:#000,color:#1e293b
+    style B256 fill:#dcfce7,stroke:#000,color:#1e293b
+```
+
+Batch=1 is deep in memory-bound territory (AI=1). By batch=256, AI reaches 186 which crosses the ridge point (156 on A100). This is why batching is the primary tool for improving GPU utilization during decode.
+
+The math (for weight matrix [4096 x 4096], FP16):
 
 ```
-FLOPs = 2 * B * K * N
-Bytes = 2 * (B*K + K*N + B*N)
+FLOPs = 2 * B * 4096 * 4096
+Bytes = 2 * (B*4096 + 4096*4096 + B*4096)
 
-For K = N = 4096, varying B:
-  B=1:   AI = 2*1*4096^2 / 2*(1*4096 + 4096^2 + 1*4096)     = 1.0
-  B=8:   AI = 2*8*4096^2 / 2*(8*4096 + 4096^2 + 8*4096)     = 7.9
-  B=32:  AI = 2*32*4096^2 / 2*(32*4096 + 4096^2 + 32*4096)   = 30.5
-  B=128: AI = 2*128*4096^2 / 2*(128*4096 + 4096^2 + 128*4096) = 107.8
-  B=256: AI = 2*256*4096^2 / 2*(256*4096 + 4096^2 + 256*4096) = 186.2
+B=1:   AI = 1.0    (memory-bound)
+B=32:  AI = 30.5   (still memory-bound)
+B=128: AI = 107.8  (approaching ridge)
+B=256: AI = 186.2  (compute-bound!)
 ```
 
-The weight matrix K*N is read once regardless of batch size. The FLOPs scale linearly with B. Therefore arithmetic intensity scales approximately linearly with batch size until the input and output terms become significant relative to the weight term. This is the mechanism by which batching converts a memory-bound workload into a compute-bound one.
+The weight matrix (4096 x 4096 = 32MB) dominates bytes at small B. As B grows, FLOPs grow linearly but bytes grow slowly (weights are read only once).
 
 ---
 
 ## The Two Ceilings
 
-Every hardware platform imposes two performance limits. These form the "roof" in the roofline model.
+Your GPU has two hard limits:
 
-### The Compute Ceiling
+| Ceiling | What it limits | A100 value | H100 value |
+|---------|---------------|-----------|-----------|
+| **Compute** | Max math per second | 312 TFLOPS | 990 TFLOPS |
+| **Bandwidth** | Max data read per second | 2 TB/s | 3.35 TB/s |
 
-The compute ceiling is the maximum number of floating-point operations per second the hardware can execute. For GPUs, this is specified as peak TFLOPS for a given precision. The compute ceiling is a horizontal line on the roofline plot because it does not depend on arithmetic intensity. No matter how much data reuse a workload achieves, it cannot exceed the hardware's raw compute rate.
+If your workload's AI is low (few FLOPs per byte), you hit the bandwidth ceiling first. If AI is high, you hit the compute ceiling first. The **ridge point** is where both ceilings meet: AI = Peak FLOPS / Bandwidth.
 
-| GPU | FP16 Tensor Core Peak | FP8 Tensor Core Peak | TF32 Peak |
-|-----|----------------------|---------------------|-----------|
-| A100 SXM 80GB | 312 TFLOPS | N/A | 156 TFLOPS |
-| H100 SXM 80GB | 990 TFLOPS | 1,979 TFLOPS | 495 TFLOPS |
-| B200 SXM | 2,250 TFLOPS | 4,500 TFLOPS | 1,125 TFLOPS |
+The chart below shows this visually. The red region is memory-bound (decode lives here). The green region is compute-bound (prefill lives here):
 
-These are theoretical peaks. Sustained compute throughput is typically 60-80% of peak due to pipeline stalls, warp scheduling overhead, and instruction mix.
+![Roofline Model for A100](images/roofline_a100.png)
 
-### The Memory Bandwidth Ceiling
+Three workloads are plotted:
+- **Red dot (Decode, batch=1):** AI = 0.9. Deep in memory-bound territory. GPU compute is 99% idle.
+- **Orange dot (Decode, batch=32):** AI = 9.2. Better, but still 17x below the ridge.
+- **Green dot (Prefill, 1K tokens):** AI = 362. Above the ridge. Compute is the bottleneck here.
 
-The memory bandwidth ceiling is the maximum rate at which the hardware can transfer data between compute units and memory. On the roofline plot, this appears as a diagonal line with slope equal to the bandwidth. The achievable FLOPS equals arithmetic intensity multiplied by bandwidth:
-
-```
-Achievable FLOPS = AI * Bandwidth
-```
-
-This relationship holds until the compute ceiling is reached. On a log-log plot, the bandwidth ceiling is a line with slope 1, rising from the origin until it intersects the compute ceiling.
-
-| GPU | HBM Bandwidth | HBM Generation | Memory Capacity |
-|-----|--------------|----------------|-----------------|
-| A100 SXM 80GB | 2,039 GB/s | HBM2e | 80 GB |
-| H100 SXM 80GB | 3,352 GB/s | HBM3 | 80 GB |
-| B200 SXM | 8,000 GB/s | HBM3e | 192 GB |
-
-Sustained bandwidth is typically 75-85% of peak due to memory controller overhead, refresh cycles, and access pattern inefficiencies.
-
-### The Roofline Shape
-
-Combining both ceilings on a log-log plot produces the characteristic roofline shape:
-
-```
-log(TFLOPS)
-     |
-     |_________________________________________________  Compute ceiling
-     |                                  /
-     |                                /
-     |                              /
-     |                            /
-     |                          /    <-- Ridge point
-     |                        /
-     |                      /
-     |                    /   Memory bandwidth ceiling
-     |                  /     (slope = bandwidth)
-     |                /
-     |              /
-     |            /
-     |          /
-     |        /
-     |      /
-     |    /
-     |  /
-     |/
-     +------------------------------------------------  log(AI)
-```
-
-Below the ridge point, performance is limited by memory bandwidth. The hardware cannot deliver data fast enough to keep compute units busy. Above the ridge point, performance is limited by compute. Data arrives faster than the hardware can process it.
-
+This single chart explains why decode is slow, why prefill is fast, and why batching helps but cannot fully solve the problem.
 
 ---
 

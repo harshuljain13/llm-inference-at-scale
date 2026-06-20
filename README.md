@@ -151,13 +151,12 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 | 00.3 | [[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/00_transformer_at_inference_time/00.3_attention_and_kv_cache/lab.ipynb)](content/00_transformer_at_inference_time/00.3_attention_and_kv_cache/attention_and_kv_cache.md) |
 | 00.4 | [[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/00_transformer_at_inference_time/00.4_why_llm_inference_is_different/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/00_transformer_at_inference_time/00.4_why_llm_inference_is_different/lab.ipynb)](content/00_transformer_at_inference_time/00.4_why_llm_inference_is_different/why_llm_inference_is_different.md) |
 
-**Chapter 01: GPU Hardware for Inference** (3 modules)
+**Chapter 01: GPU Hardware for Inference** (2 modules)
 
 | Module | Title |
 |:------:|-------|
 | 01.1 | [1.1 GPU Memory Hierarchy](content/01_gpu_hardware/01.1_gpu_memory_hierarchy/gpu_memory.md) |
 | 01.2 | [1.2 The Roofline Model](content/01_gpu_hardware/01.2_roofline_model/roofline_fundamentals.md) |
-| 01.3 | [1.3 Why Decode is Slow](content/01_gpu_hardware/01.3_why_decode_is_slow/decode_and_batching.md) |
 
 **Chapter 02: Sizing and Serving** (3 modules)
 
