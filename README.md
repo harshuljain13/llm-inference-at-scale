@@ -138,123 +138,132 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 
 ## 📚 Table of Contents
 
+> **12 chapters, 59 modules.** Each module is a focused 8-10 minute read with a companion lab notebook.
+
 ### Part I: Foundations
 
-*"I can explain why LLM inference is memory-bound, trace every byte, and predict performance from first principles."*
+**Chapter 00: The Transformer at Inference Time**
 
-**Ch 00 — Transformer Anatomy: Where Every Byte of GPU Memory Goes**
+| Module | Title |
+|:------:|-------|
+| 0.1 | [Transformer Architecture](content/00_transformer_at_inference_time/00.1_transformer_architecture/transformer_anatomy_and_memory.md) |
+| 0.2 | [What Happens During Inference](content/00_transformer_at_inference_time/00.2_what_happens_during_inference/what_is_llm_inference.md) |
+| 0.3 | [Prefill vs Decode](content/00_transformer_at_inference_time/00.3_prefill_vs_decode/prefill_vs_decode.md) |
+| 0.4 | [Attention and the KV Cache](content/00_transformer_at_inference_time/00.4_attention_and_kv_cache/kv_cache.md) |
+| 0.5 | [The Token Generation Pipeline](content/00_transformer_at_inference_time/00.5_token_generation_pipeline/token_generation_pipeline.md) |
+| 0.6 | [Why LLM Inference is Different](content/00_transformer_at_inference_time/00.6_why_llm_inference_is_different/why_llm_inference_is_different.md) |
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 0.0 | [Transformer Architecture & Memory](content/00_foundations/00.0_transformer_anatomy_and_memory/transformer_anatomy_and_memory.md) | Architecture, anchor values, KV cache as scaling constraint |
-| 0.1 | [What is LLM Inference?](content/00_foundations/00.1_what_is_llm_inference/what_is_llm_inference.md) | Tokenization, prefill, decode, sampling, key metrics |
-| 0.2 | [Why LLM Inference is Different](content/00_foundations/00.2_why_llm_inference_is_different/why_llm_inference_is_different.md) | 100x cost gap, memory bandwidth wall, roofline model |
+**Chapter 01: GPU Hardware for Inference**
 
-**Ch 01 — GPU Fundamentals: Finding Your Hardware Bottleneck**
+| Module | Title |
+|:------:|-------|
+| 1.1 | [GPU Memory Hierarchy](content/01_gpu_hardware/01.1_gpu_memory_hierarchy/gpu_memory.md) |
+| 1.2 | [The Roofline Model](content/01_gpu_hardware/01.2_roofline_model/roofline_fundamentals.md) |
+| 1.3 | [Why Decode is Slow](content/01_gpu_hardware/01.3_why_decode_is_slow/decode_and_batching.md) |
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 1.1 | [GPU Memory & Hierarchy](content/01_gpu_fundamentals/01.1_gpu_memory/gpu_memory.md) | HBM, VRAM budgeting, instance selection |
-| 1.2 | [Roofline Model](content/01_gpu_fundamentals/01.2_roofline_model/roofline_model.md) | Arithmetic intensity, compute vs memory bound |
-| 1.3 | [FlashAttention](content/01_gpu_fundamentals/01.3_flash_attention/flash_attention.md) | IO-aware attention, online softmax, tiling |
+**Chapter 02: Sizing and Serving**
 
-**Ch 02 — Attention Mechanisms: How Design Choices Shape Your KV Cache**
-
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 2.1 | [KV Caching](content/02_attention_mechanisms/02.1_kv_caching/kv_caching.md) | Why KV cache exists, memory formulas, growth |
-| 2.2 | [Attention Mechanisms](content/02_attention_mechanisms/02.2_attention_mechanisms/attention_mechanisms.md) | MHA to MQA to GQA evolution |
-| 2.5 | [Multi-Latent Attention](content/02_attention_mechanisms/02.3_multi_latent_attention/multi_latent_attention.md) | DeepSeek MLA, low-rank KV compression, LMCache |
-
-**Ch 03 — KV Cache Engineering: From PagedAttention to Cross-Request Sharing**
-
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 3.1 | [PagedAttention](content/03_kv_cache_engineering/03.1_paged_attention/paged_attention.md) | Virtual memory for KV cache |
-| 3.2 | [KV Cache Compression](content/03_kv_cache_engineering/03.2_kv_cache_compression/kv_cache_compression.md) | Quantized KV, eviction, TurboQuant |
-
----
+| Module | Title |
+|:------:|-------|
+| 2.1 | [VRAM Budget](content/02_sizing_and_serving/02.1_vram_budget/vram_budgeting.md) |
+| 2.2 | [Batch Size and Throughput](content/02_sizing_and_serving/02.2_batch_size_and_throughput/batch_and_instance_selection.md) |
+| 2.3 | [Serving Implications](content/02_sizing_and_serving/02.3_serving_implications/serving_implications.md) |
 
 ### Part II: Optimizations
 
-*"I can make the same model serve 10x more users on the same hardware."*
+**Chapter 03: Attention Variants**
 
-**Ch 04 — Quantization and Speculative Decoding: Doubling Throughput on the Same Hardware**
+| Module | Title |
+|:------:|-------|
+| 3.1 | [Multi-Head Attention (MHA)](content/03_attention_variants/03.1_mha/mha.md) |
+| 3.2 | [MQA and GQA](content/03_attention_variants/03.2_mqa_gqa/mqa_gqa.md) |
+| 3.3 | [GQA Deep Dive](content/03_attention_variants/03.3_gqa_deep_dive/gqa_deep_dive.md) |
+| 3.4 | [Multi-Latent Attention (MLA)](content/03_attention_variants/03.4_mla/multi_latent_attention.md) |
+| 3.5 | [FlashAttention: Why Standard Attention is Slow](content/03_attention_variants/03.5_flash_attention_problem/flash_attention_problem.md) |
+| 3.6 | [FlashAttention: The Algorithm](content/03_attention_variants/03.6_flash_attention_algorithm/flash_attention_algorithm.md) |
+| 3.7 | [FlashAttention: In Practice](content/03_attention_variants/03.7_flash_attention_practice/flash_attention_practice.md) |
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 4.1 | [Quantization](content/04_optimization/04.1_quantization/quantization.md) | INT8, INT4, FP8, GPTQ, AWQ |
-| 4.2 | [TurboQuant](content/04_optimization/04.2_turboquant/turboquant.md) | KV cache-specific quantization |
-| 4.3 | [Continuous Batching](content/04_optimization/04.3_continuous_batching/continuous_batching.md) | Dynamic batch scheduling |
-| 4.4 | [Speculative Decoding](content/04_optimization/04.4_speculative_decoding/speculative_decoding.md) | Draft-verify, EAGLE, Medusa |
-| 4.5 | [Chunked Prefill](content/04_optimization/04.5_chunked_prefill/chunked_prefill.md) | Splitting prefill to reduce decode latency |
-| 4.6 | [Inference-Time Compute](content/04_optimization/04.6_inference_time_compute/inference_time_compute.md) | Test-time scaling, reasoning models (o1/R1), budget-aware inference |
+**Chapter 04: KV Cache Engineering**
 
-**Ch 05 — Inference Engines: Choosing vLLM, SGLang, or TRT-LLM**
+| Module | Title |
+|:------:|-------|
+| 4.1 | [PagedAttention](content/04_kv_cache_engineering/04.1_paged_attention/paged_attention.md) |
+| 4.2 | [KV Cache Compression](content/04_kv_cache_engineering/04.2_kv_cache_compression/kv_cache_compression.md) |
+| 4.3 | [Smart KV Caching](content/04_kv_cache_engineering/04.3_smart_kv_caching/smart_kv_caching.md) |
+| 4.4 | [LMCache](content/04_kv_cache_engineering/04.4_lmcache/lmcache.md) |
+| 4.5 | [Prefix Caching](content/04_kv_cache_engineering/04.5_prefix_caching/prefix_caching.md) |
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 5.1 | [vLLM](content/05_engines/05.1_vllm/vllm.md) | PagedAttention engine, production tuning |
-| 5.2 | [SGLang](content/05_engines/05.2_sglang/sglang.md) | RadixAttention, structured generation |
-| 5.3 | [TensorRT-LLM](content/05_engines/05.3_tensorrt_llm/tensorrt_llm.md) | NVIDIA compiled runtime |
-| 5.4 | [NVIDIA Dynamo](content/05_engines/05.4_nvidia_dynamo/nvidia_dynamo.md) | Distributed inference orchestration, NIXL, disaggregated P/D |
+**Chapter 05: Optimization Techniques**
 
-**Ch 06 — Parallelism: Fitting Models That Don't Fit on One GPU**
+| Module | Title |
+|:------:|-------|
+| 5.1 | [Quantization](content/05_optimization/04.1_quantization/quantization.md) |
+| 5.2 | [Continuous Batching](content/05_optimization/04.3_continuous_batching/continuous_batching.md) |
+| 5.3 | [Speculative Decoding](content/05_optimization/04.4_speculative_decoding/speculative_decoding_advanced.md) |
+| 5.4 | [Chunked Prefill](content/05_optimization/04.5_chunked_prefill/chunked_prefill.md) |
+| 5.5 | [Inference-Time Compute](content/05_optimization/04.6_inference_time_compute/inference_time_compute.md) |
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 6.1 | [Tensor Parallelism](content/06_scaling/06.1_tensor_parallelism/tensor_parallelism.md) | Splitting across GPUs, AllReduce, NVLink |
-| 6.2 | [MoE Inference](content/06_scaling/06.2_moe_inference/moe_inference.md) | Expert parallelism, routing, load balancing |
-| 6.3 | [Distillation](content/06_scaling/06.3_distillation/distillation.md) | Compressing models for efficient serving |
+### Part III: Engines & Scaling
 
----
+**Chapter 06: Inference Engines**
 
-### Part III: Operationalization
+| Module | Title |
+|:------:|-------|
+| 6.1 | [vLLM](content/06_engines/05.1_vllm/vllm.md) |
+| 6.2 | [SGLang](content/06_engines/05.2_sglang/sglang.md) |
+| 6.3 | [TensorRT-LLM](content/06_engines/05.3_tensorrt_llm/tensorrt_llm.md) |
+| 6.4 | [NVIDIA Dynamo](content/06_engines/05.4_nvidia_dynamo/nvidia_dynamo.md) |
 
-*"I can run inference in production for millions of users, globally, without burning money."*
+**Chapter 07: Scaling**
 
-**Ch 07 — Serving: From Single Request to Production Fleet**
+| Module | Title |
+|:------:|-------|
+| 7.1 | [Tensor Parallelism](content/07_scaling/06.1_tensor_parallelism/tensor_parallelism.md) |
+| 7.2 | [MoE Inference](content/07_scaling/06.2_moe_inference/moe_inference.md) |
+| 7.3 | [Distillation](content/07_scaling/06.3_distillation/distillation.md) |
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 7.1 | [Ray Serve](content/07_serving/07.1_ray_serve/ray_serve.md) | Scalable LLM services with Ray |
-| 7.2 | [EKS + KServe](content/07_serving/07.2_eks_kserve/eks_kserve.md) | Kubernetes-native LLM deployment |
-| 7.3 | [SageMaker](content/07_serving/07.3_sagemaker/sagemaker.md) | AWS managed inference |
-| 7.4 | [Disaggregated Serving](content/07_serving/07.4_disaggregated_serving/disaggregated_serving.md) | Prefill/decode separation |
-| 7.5 | [Cold Start](content/07_serving/07.5_cold_start/cold_start.md) | Model loading latency mitigation |
-| 7.6 | [Cache-Aware Routing](content/07_serving/07.6_cache_aware_routing/cache_aware_routing.md) | Prefix routing, semantic caching, session affinity |
-| 7.7 | [Kubernetes Inference Infrastructure](content/07_serving/07.7_kubernetes_inference_infrastructure/kubernetes_inference_infrastructure.md) | KAI Scheduler, DRA, Gateway API, Envoy AI Gateway, llm-d |
+### Part IV: Production
 
-**Ch 08 — Operations: The Metrics That Actually Predict Outages**
+**Chapter 08: Serving Infrastructure**
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 8.1 | [Benchmarking](content/08_operations/08.1_benchmarking/benchmarking.md) | Measuring inference performance |
-| 8.2 | [Structured Output](content/08_operations/08.2_structured_output/structured_output.md) | JSON schemas, constrained decoding |
-| 8.3 | [Edge Deployment](content/08_operations/08.3_edge_deployment/edge_deployment.md) | llama.cpp, GGUF, mobile inference |
-| 8.4 | [Inference Metrics & Goodput](content/08_operations/08.4_inference_metrics/inference_metrics.md) | SLOs, percentiles, monitoring, cost |
-| 8.5 | [Multi-Region KV Locality](content/08_operations/08.5_multi_region_kv_locality/multi_region_kv_locality.md) | RDMA, KV transfer, DistServe, Mooncake |
-| 8.6 | [Custom Silicon](content/08_operations/08.6_custom_silicon/custom_silicon.md) | Groq LPU, Cerebras WSE-3, AWS Trainium, beyond GPUs |
+| Module | Title |
+|:------:|-------|
+| 8.1 | [Ray Serve](content/08_serving/07.1_ray_serve/ray_serve.md) |
+| 8.2 | [EKS + KServe](content/08_serving/07.2_eks_kserve/eks_kserve.md) |
+| 8.3 | [SageMaker](content/08_serving/07.3_sagemaker/sagemaker.md) |
+| 8.4 | [Disaggregated Serving](content/08_serving/07.4_disaggregated_serving/disaggregated_serving.md) |
+| 8.5 | [Cold Start](content/08_serving/07.5_cold_start/cold_start.md) |
+| 8.6 | [Cache-Aware Routing](content/08_serving/07.6_cache_aware_routing/cache_aware_routing.md) |
+| 8.7 | [Kubernetes Inference Infrastructure](content/08_serving/07.7_kubernetes_inference_infrastructure/kubernetes_inference_infrastructure.md) |
 
-**Ch 09 — Production Stories: How Meta and Databricks Run at Scale**
+**Chapter 09: Operations**
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 9.1 | [Meta Inference Platform](content/09_production_stories/09.1_meta_inference_platform/meta_inference_platform.md) | Model Runner, TP+CP+EP at 100K GPUs |
-| 9.2 | [Databricks Multi-Tenant Serving](content/09_production_stories/09.2_databricks_multi_tenant/databricks_multi_tenant.md) | Model Units, LoRA multiplexing |
-| 9.3 | [Mixed Workload Management](content/09_production_stories/09.3_mixed_workload_management/mixed_workload_management.md) | Scheduling, preemption, fleet economics |
+| Module | Title |
+|:------:|-------|
+| 9.1 | [Benchmarking](content/09_operations/08.1_benchmarking/benchmarking.md) |
+| 9.2 | [Structured Output](content/09_operations/08.2_structured_output/structured_output.md) |
+| 9.3 | [Edge Deployment](content/09_operations/08.3_edge_deployment/edge_deployment.md) |
+| 9.4 | [Inference Metrics and Goodput](content/09_operations/08.4_inference_metrics/inference_metrics.md) |
+| 9.5 | [Multi-Region KV Locality](content/09_operations/08.5_multi_region_kv_locality/multi_region_kv_locality.md) |
+| 9.6 | [Custom Silicon](content/09_operations/08.6_custom_silicon/custom_silicon.md) |
 
-**Ch 10 — System Designs: Architecting Inference for 1M Concurrent Users**
+**Chapter 10: Production Stories**
 
-| Module | Title | Description |
-|:------:|-------|-------------|
-| 10.1 | [ChatGPT-Scale Chatbot](content/10_system_designs/10.1_chatgpt_scale_chatbot/chatgpt_scale_chatbot.md) | 1M concurrent, multi-region, session affinity |
-| 10.2 | [Code Copilot](content/10_system_designs/10.2_code_copilot/code_copilot.md) | <200ms TTFT, 128K context, speculative decoding |
-| 10.3 | [Enterprise RAG](content/10_system_designs/10.3_enterprise_rag/enterprise_rag.md) | Multi-model cascade, batch + real-time |
-| 10.4 | [Multi-Model Gateway](content/10_system_designs/10.4_multi_model_gateway/multi_model_gateway.md) | Route 405B/70B/8B/1.5B by SLO and cost |
-| 10.5 | [Agentic Workload](content/10_system_designs/10.5_agentic_workload/agentic_workload.md) | Multi-step KV, tool calls, session persistence |
+| Module | Title |
+|:------:|-------|
+| 10.1 | [Meta Inference Platform](content/10_production_stories/09.1_meta_inference_platform/meta_inference_platform.md) |
+| 10.2 | [Databricks Multi-Tenant Serving](content/10_production_stories/09.2_databricks_multi_tenant/databricks_multi_tenant.md) |
+| 10.3 | [Mixed Workload Management](content/10_production_stories/09.3_mixed_workload_management/mixed_workload_management.md) |
 
----
+**Chapter 11: System Designs**
+
+| Module | Title |
+|:------:|-------|
+| 11.1 | [ChatGPT-Scale Chatbot](content/11_system_designs/10.1_chatgpt_scale_chatbot/chatgpt_scale_chatbot.md) |
+| 11.2 | [Code Copilot](content/11_system_designs/10.2_code_copilot/code_copilot.md) |
+| 11.3 | [Enterprise RAG](content/11_system_designs/10.3_enterprise_rag/enterprise_rag.md) |
+| 11.4 | [Multi-Model Gateway](content/11_system_designs/10.4_multi_model_gateway/multi_model_gateway.md) |
+| 11.5 | [Agentic Workloads](content/11_system_designs/10.5_agentic_workload/agentic_workload.md) |
 
 ## 📐 Key Equations
 
