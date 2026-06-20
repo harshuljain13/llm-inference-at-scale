@@ -215,4 +215,3 @@ next_token_logits = logits[:, -1, :]  # [1, 128256]
 The LM head is 1 GB but you only use one row of output during generation. You compute logits for all 128K vocab entries, but you only sample one token. This is unavoidable because you need the full probability distribution to sample from.
 
 ---
-
