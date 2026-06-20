@@ -1,52 +1,31 @@
 [project]
-name = "llm-inference-workshop"
+name = "llm-inference-at-scale"
 version = "0.1.0"
-description = "LLM Inference at Scale Workshop - Hands-on labs and examples"
-readme = "roadmap.md"
+description = "A practitioners handbook for LLM inference optimization"
 requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Harshul Jain"}]
+
 dependencies = [
-    "torch>=2.2.0",
-    "transformers>=4.40.0",
-    "accelerate>=0.27.0",
-    "tiktoken>=0.6.0",
-    "numpy>=1.26.0",
-    "pandas>=2.2.0",
-    "matplotlib>=3.8.0",
-    "seaborn>=0.13.0",
-    "tqdm>=4.66.0",
-    "ipykernel>=6.29.0",
-    "jupyter>=1.0.0",
-    "notebook>=7.0.0",
-    "ipywidgets>=8.1.0",
+    "torch>=2.0",
+    "numpy>=1.24,<2.1",
+    "matplotlib>=3.7",
+    "aiohttp",
+    "pydantic",
+    "tabulate",
+    "pyyaml",
+    "transformers",
+    "huggingface_hub",
 ]
 
 [project.optional-dependencies]
-# GPU inference engines (install on GPU machines)
-inference = [
-    "vllm>=0.4.0",
-    "sglang>=0.1.0",
-]
-# Development tools
-dev = [
-    "pytest>=8.0.0",
-    "ruff>=0.3.0",
-    "black>=24.0.0",
-]
-# All dependencies
-all = [
-    "llm-inference-workshop[inference,dev]",
-]
+serving = ["vllm>=0.6", "sglang[all]>=0.4"]
+dev = ["jupyter", "ipykernel", "pytest"]
 
-[tool.uv]
-dev-dependencies = [
-    "pytest>=8.0.0",
-    "ruff>=0.3.0",
-]
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
 
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "W"]
-ignore = ["E501"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["utils*"]

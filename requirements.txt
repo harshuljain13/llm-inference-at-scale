@@ -1,6 +1,6 @@
 torch>=2.0
-numpy
-matplotlib
+numpy>=1.24,<2.1
+matplotlib>=3.7
 aiohttp
 pydantic
 tabulate
