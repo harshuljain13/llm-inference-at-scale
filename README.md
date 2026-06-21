@@ -212,7 +212,7 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 | 05.3 | [TensorRT-LLM: Compiler-First Inference on NVIDIA Hardware](content/06_engines/05.3_tensorrt_llm/tensorrt_llm.md) |
 | 05.4 | [NVIDIA Dynamo: The Next-Generation Distributed Inference Framework](content/06_engines/05.4_nvidia_dynamo/nvidia_dynamo.md) |
 
-**Chapter 07: Scaling** (3 modules)
+**Chapter 07: Scaling** (2 modules)
 
 | Module | Title |
 |:------:|-------|
@@ -245,7 +245,7 @@ Or browse the [Table of Contents](#-table-of-contents) below.
 | 08.5 | [Multi-Region Inference and KV Cache Locality](content/09_operations/08.5_multi_region_kv_locality/multi_region_kv_locality.md) |
 | 08.6 | [Beyond GPUs: Custom Silicon for LLM Inference](content/09_operations/08.6_custom_silicon/custom_silicon.md) |
 
-**Chapter 10: Production Stories** (3 modules)
+**Chapter 10: Production Stories** (2 modules)
 
 | Module | Title |
 |:------:|-------|
