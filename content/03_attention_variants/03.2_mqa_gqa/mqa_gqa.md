@@ -1,268 +1,183 @@
-# 3.2 MQA and GQA
+# 3.2 Multi-Query and Grouped-Query Attention
 
----
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.2_mqa_gqa/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.cloud/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.2_mqa_gqa/lab.ipynb)
 
-## Grouped-Query Attention (GQA): The Practical Middle Ground
+Multi-Head Attention (MHA) stores independent Key and Value projections for every attention head. This provides maximum representational capacity but consumes KV cache memory proportional to the number of heads. Multi-Query Attention (MQA) and Grouped-Query Attention (GQA) reduce this cost by sharing KV projections across query heads, trading a small quality margin for dramatically higher serving throughput.
 
-In June 2023, Ainslie et al. published "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints," establishing the design that would become the industry default within a year. The insight: you do not need to go all the way to one KV head. Grouping query heads into clusters that share KV projections captures most of MQA's memory savings with almost none of its quality loss.
+## The KV Sharing Spectrum
 
-### The Architecture
+The three mechanisms form a spectrum from full independence to full sharing:
 
-In GQA, the `n_heads` query heads are divided into `n_kv_groups` groups. Each group shares one K and one V projection. The number of KV heads equals the number of groups:
-
-```
-n_kv_heads = n_heads / group_size
-```
-
-For example, Llama 3.1 8B has 32 query heads divided into 8 groups of 4. Each group of 4 query heads shares one KV head.
-
-```
-# GQA: n_heads query projections, n_kv_heads KV projections
-Q_i = x @ W_Q_i       # i = 1..n_heads, shape: [seq_len, head_dim]
-K_g = x @ W_K_g       # g = 1..n_kv_heads, shape: [seq_len, head_dim]
-V_g = x @ W_V_g       # g = 1..n_kv_heads, shape: [seq_len, head_dim]
-
-# Query heads in group g attend using K_g and V_g
-# If group_size=4, heads {1,2,3,4} share K_1,V_1
-# heads {5,6,7,8} share K_2,V_2, etc.
-```
-
-### KV Cache Memory Formula for GQA
-
-```
-KV_cache_per_token (GQA) = 2 × n_kv_heads × head_dim × n_layers × bytes_per_element
+```mermaid
+flowchart LR
+    subgraph MHA["MHA: 32 KV heads"]
+        style MHA fill:#ffe4e6,stroke:#000,color:#000
+        A["Each query head
+gets its own K,V"]
+    end
+    subgraph GQA["GQA: 8 KV heads"]
+        style GQA fill:#dbeafe,stroke:#000,color:#000
+        B["Groups of 4 query heads
+share one K,V pair"]
+    end
+    subgraph MQA["MQA: 1 KV head"]
+        style MQA fill:#dcfce7,stroke:#000,color:#000
+        C["All 32 query heads
+share one K,V pair"]
+    end
+    MHA --> GQA --> MQA
 ```
 
-### Compression Relative to MHA
+The KV cache formula for any variant is:
 
 ```
-GQA_compression = n_heads / n_kv_heads = group_size
+KV_cache_per_token = 2 x n_kv_heads x head_dim x n_layers x bytes_per_element
 ```
 
-For Llama 3.1 8B with `group_size = 4`:
+Compression relative to MHA equals  (the group size).
 
-```
-KV per token = 2 × 8 × 128 × 32 × 2 = 131,072 bytes = 128 KB/token
-MHA equivalent = 2 × 32 × 128 × 32 × 2 = 524,288 bytes = 512 KB/token
-Compression = 4×
-```
+## Multi-Query Attention (MQA)
 
-### Why GQA Wins: The Quality-Memory Pareto Frontier
-
-Ainslie et al. (2023) systematically evaluated the quality-memory tradeoff across group sizes. Their key findings:
-
-1. **GQA-8 matches MHA quality** on most benchmarks (within 0.1-0.3%) while providing 4× memory reduction for a 32-head model.
-2. **MQA degrades measurably** on long-form generation and multi-hop reasoning, with 0.5-2% drops that compound across benchmark suites.
-3. **The sweet spot is group_size 4-8**: Going below 4 KV heads provides diminishing memory returns while accelerating quality loss.
-
-The reason GQA preserves quality better than MQA is that different groups of query heads CAN still specialize their attention patterns through different KV representations. With 8 KV heads, the model retains 8 distinct "views" of the input, which is sufficient for most tasks. MQA's single view is too constraining for complex reasoning.
-
-### Converting MHA Checkpoints to GQA
-
-One of GQA's practical advantages is straightforward checkpoint conversion. Ainslie et al. (2023) showed two approaches:
-
-**Mean pooling**: Average the KV weights within each group:
-```python
-# Convert 32 KV heads to 8 GQA groups
-for g in range(n_kv_heads):
-    start = g * group_size
-    end = start + group_size
-    W_K_gqa[g] = mean(W_K_mha[start:end], dim=0)
-    W_V_gqa[g] = mean(W_V_mha[start:end], dim=0)
-```
-
-**Selective**: Pick one representative head per group (the one with highest attention entropy). This requires less compute but slightly more quality variance.
-
-After conversion, 5-10% additional pre-training compute recovers the remaining quality gap. This "uptraining" approach allowed Meta to convert Llama 2 from MHA to GQA for Llama 2 70B with minimal overhead.
-
-### Concrete Example: Llama 3.1 Family
-
-| Model | Query Heads | KV Heads | Group Size | KV/token | vs MHA |
-|-------|-------------|----------|------------|----------|--------|
-| Llama 3.1 8B | 32 | 8 | 4 | 128 KB | 4× smaller |
-| Llama 3.1 70B | 64 | 8 | 8 | 256 KB | 8× smaller |
-| Llama 3.1 405B | 128 | 8 | 16 | 512 KB | 16× smaller |
-
-Notice how Meta keeps `n_kv_heads = 8` constant across all model sizes, increasing the group size (and compression ratio) as models scale. This is a deliberate design choice: larger models have more query heads that can share KV projections without quality loss, because their increased capacity compensates for the shared representation.
-
-### Models Using GQA
-
-| Model | Year | Query Heads | KV Heads | Group Size |
-|-------|------|-------------|----------|------------|
-| Llama 2 70B | 2023 | 64 | 8 | 8 |
-| Llama 3/3.1 8B | 2024 | 32 | 8 | 4 |
-| Llama 3/3.1 70B | 2024 | 64 | 8 | 8 |
-| Mistral 7B | 2023 | 32 | 8 | 4 |
-| Mixtral 8x7B | 2024 | 32 | 8 | 4 |
-| Gemma 2 | 2024 | 16 | 8 | 2 |
-| Qwen 2 | 2024 | 28 | 4 | 7 |
-| DeepSeek-V2 | 2024 | 128 | Uses MLA | See 02.3 |
-
----
-
-## Unified Comparison
-
-### Memory Per Token (FP16, 32 Layers, head_dim=128)
-
-| Mechanism | KV Heads (32-head model) | Memory/Token | Relative to MHA | Quality Impact |
-|-----------|--------------------------|--------------|-----------------|----------------|
-| MHA | 32 | 512 KB | 1.0× (baseline) | None (baseline) |
-| GQA-8 | 8 | 128 KB | 0.25× (4× smaller) | Negligible (< 0.3%) |
-| GQA-4 | 4 | 64 KB | 0.125× (8× smaller) | Small (0.3-0.5%) |
-| MQA | 1 | 16 KB | 0.03× (32× smaller) | Moderate (0.5-2%) |
-
-### Concurrent Users at 4K Context on 80 GB A100
-
-Assuming 20 GB available for KV cache (rest used by model weights and activations):
-
-| Mechanism | KV per user (4K ctx) | Max Concurrent Users |
-|-----------|---------------------|---------------------|
-| MHA | 2,048 MB | 9 users |
-| GQA-8 | 512 MB | 39 users |
-| GQA-4 | 256 MB | 78 users |
-| MQA | 64 MB | 312 users |
-
-This table is the reason GQA became the industry default. Going from 9 concurrent users to 39 users on the same hardware directly translates to 4× higher revenue per GPU at equivalent latency.
-
-### Quality Benchmarks (from Ainslie et al., 2023)
-
-On a T5-XXL equivalent model:
-
-| Mechanism | MMLU | HellaSwag | TriviaQA | SQuAD | Average |
-|-----------|------|-----------|----------|-------|---------|
-| MHA | 58.3 | 82.1 | 71.5 | 88.2 | 75.0 |
-| GQA-8 | 58.1 | 81.9 | 71.2 | 88.0 | 74.8 |
-| GQA-4 | 57.8 | 81.6 | 70.8 | 87.6 | 74.5 |
-| MQA | 57.2 | 81.0 | 69.4 | 86.8 | 73.6 |
-
-The 1.4-point average gap between MHA and MQA may seem small, but it compounds: a model that is 1.4% worse on every subtask will produce noticeably lower-quality outputs in production, especially for multi-step reasoning chains where errors accumulate.
-
----
-
-## Code: Computing KV Cache Size for Each Variant
+Shazeer (2019) proposed MQA to eliminate KV cache redundancy entirely. All query heads share a single K and single V projection. The computation becomes:
 
 ```python
-def compute_kv_cache_size(
-    n_heads: int,
-    n_kv_heads: int,
-    head_dim: int,
-    n_layers: int,
-    seq_len: int,
-    dtype_bytes: int = 2,  # FP16
-    batch_size: int = 1,
-) -> dict:
-    """Compute KV cache memory for any attention variant.
-    
-    Args:
-        n_heads: Number of query heads (determines variant name)
-        n_kv_heads: Number of KV heads (1=MQA, <n_heads=GQA, =n_heads=MHA)
-        head_dim: Dimension per head
-        n_layers: Number of transformer layers
-        seq_len: Sequence length (tokens in context)
-        dtype_bytes: Bytes per element (2=FP16, 1=INT8)
-        batch_size: Number of concurrent sequences
-    
-    Returns:
-        Dictionary with memory breakdown
-    """
-    # Determine variant name
-    if n_kv_heads == n_heads:
-        variant = "MHA"
-    elif n_kv_heads == 1:
-        variant = "MQA"
-    else:
-        variant = f"GQA-{n_kv_heads}"
-    
-    # Core formula: 2 (K+V) × kv_heads × head_dim × layers × seq × dtype × batch
-    per_token = 2 * n_kv_heads * head_dim * n_layers * dtype_bytes
-    per_sequence = per_token * seq_len
-    total = per_sequence * batch_size
-    
-    # Compare to MHA baseline
-    mha_per_token = 2 * n_heads * head_dim * n_layers * dtype_bytes
-    compression = mha_per_token / per_token
-    
-    return {
-        "variant": variant,
-        "per_token_bytes": per_token,
-        "per_token_kb": per_token / 1024,
-        "per_sequence_mb": per_sequence / (1024**2),
-        "total_mb": total / (1024**2),
-        "compression_vs_mha": f"{compression:.1f}×",
-        "group_size": n_heads // n_kv_heads,
-    }
-
-
-# === Llama 3.1 8B (GQA-8) ===
-result = compute_kv_cache_size(
-    n_heads=32, n_kv_heads=8, head_dim=128,
-    n_layers=32, seq_len=4096, batch_size=1
-)
-print(f"Llama 3.1 8B ({result['variant']})")
-print(f"  Per token: {result['per_token_kb']:.1f} KB")
-print(f"  Per sequence (4K): {result['per_sequence_mb']:.1f} MB")
-print(f"  Compression vs MHA: {result['compression_vs_mha']}")
-print()
-
-# === Same model as MHA (hypothetical) ===
-result_mha = compute_kv_cache_size(
-    n_heads=32, n_kv_heads=32, head_dim=128,
-    n_layers=32, seq_len=4096, batch_size=1
-)
-print(f"Hypothetical MHA equivalent ({result_mha['variant']})")
-print(f"  Per token: {result_mha['per_token_kb']:.1f} KB")
-print(f"  Per sequence (4K): {result_mha['per_sequence_mb']:.1f} MB")
-print()
-
-# === Same model as MQA (hypothetical) ===
-result_mqa = compute_kv_cache_size(
-    n_heads=32, n_kv_heads=1, head_dim=128,
-    n_layers=32, seq_len=4096, batch_size=1
-)
-print(f"Hypothetical MQA equivalent ({result_mqa['variant']})")
-print(f"  Per token: {result_mqa['per_token_kb']:.1f} KB")
-print(f"  Per sequence (4K): {result_mqa['per_sequence_mb']:.1f} MB")
-print(f"  Compression vs MHA: {result_mqa['compression_vs_mha']}")
-print()
-
-# === Concurrent user capacity ===
-gpu_memory_gb = 80
-model_weights_gb = 16  # Llama 8B in FP16
-activation_gb = 4
-available_for_kv_gb = gpu_memory_gb - model_weights_gb - activation_gb
-
-for name, kv_per_seq_mb in [
-    ("MHA", result_mha['per_sequence_mb']),
-    ("GQA-8", result['per_sequence_mb']),
-    ("MQA", result_mqa['per_sequence_mb']),
-]:
-    max_users = int((available_for_kv_gb * 1024) / kv_per_seq_mb)
-    print(f"  {name}: {max_users} concurrent users at 4K context on A100-80GB")
+Q_i = x @ W_Q_i       # i = 1..n_heads (32 separate projections)
+K   = x @ W_K         # one shared projection
+V   = x @ W_V         # one shared projection
 ```
 
-Expected output:
+For a 32-head model with head_dim=128 and 32 layers in FP16, MQA stores only 16 KB per token compared to 512 KB for MHA. This 32x compression enables hundreds of concurrent users on a single GPU. The cost: all query heads must form their attention patterns from identical key-value representations, limiting the model's ability to attend to different aspects of the input simultaneously.
+
+## Grouped-Query Attention (GQA)
+
+Ainslie et al. (2023) introduced GQA as a middle ground. Query heads are divided into groups that share KV projections:
+
+```mermaid
+flowchart LR
+    subgraph Groups["GQA-8 for 32 query heads"]
+        style Groups fill:#f3f4f6,stroke:#000,color:#000
+        subgraph G1["Group 1"]
+            style G1 fill:#dbeafe,stroke:#000,color:#000
+            Q1["Q1-Q4"] --- KV1["K1, V1"]
+        end
+        subgraph G2["Group 2"]
+            style G2 fill:#dcfce7,stroke:#000,color:#000
+            Q2["Q5-Q8"] --- KV2["K2, V2"]
+        end
+        subgraph G3["..."]
+            style G3 fill:#fef3c7,stroke:#000,color:#000
+            Q3["..."] --- KV3["..."]
+        end
+        subgraph G8["Group 8"]
+            style G8 fill:#f3e8ff,stroke:#000,color:#000
+            Q8["Q29-Q32"] --- KV8["K8, V8"]
+        end
+    end
 ```
-Llama 3.1 8B (GQA-8)
-  Per token: 128.0 KB
-  Per sequence (4K): 512.0 MB
-  Compression vs MHA: 4.0×
 
-Hypothetical MHA equivalent (MHA)
-  Per token: 512.0 KB
-  Per sequence (4K): 2048.0 MB
+With 8 KV heads instead of 32, the model retains 8 distinct "views" of the input. Different groups can still specialize their attention patterns through different KV representations, which is sufficient for most tasks.
 
-Hypothetical MQA equivalent (MQA)
-  Per token: 16.0 KB
-  Per sequence (4K): 64.0 MB
-  Compression vs MHA: 32.0×
+### Why GQA Preserves Quality
 
-  MHA: 29 concurrent users at 4K context on A100-80GB
-  GQA-8: 117 concurrent users at 4K context on A100-80GB
-  MQA: 960 concurrent users at 4K context on A100-80GB
+Ainslie et al. (2023) showed that GQA-8 matches MHA within 0.2 points on average across benchmarks (MMLU, HellaSwag, TriviaQA), while MQA drops 1.4 points. The reason: complex reasoning requires multiple independent attention patterns. Eight KV heads provide enough diversity; one does not.
+
+### Converting MHA to GQA
+
+Existing MHA checkpoints convert to GQA by mean-pooling KV weights within each group, followed by 5-10% additional pretraining ("uptraining"). This is how Meta converted Llama 2 70B from MHA to GQA with minimal quality loss.
+
+## Concrete Numbers: Memory and Concurrency
+
+For a 32-head, 32-layer model with head_dim=128 in FP16:
+
+| Variant | KV Heads | Memory/Token | Compression | Users at 4K (20 GB budget) |
+|---------|----------|-------------|-------------|---------------------------|
+| MHA | 32 | 512 KB | 1x | 9 |
+| GQA-8 | 8 | 128 KB | 4x | 39 |
+| GQA-4 | 4 | 64 KB | 8x | 78 |
+| MQA | 1 | 16 KB | 32x | 312 |
+
+Going from 9 to 39 concurrent users on the same GPU translates directly to 4x higher revenue per device at equivalent latency. This is why GQA became the industry default within a year of publication.
+
+## Production Adoption
+
+```mermaid
+flowchart LR
+    subgraph Models["GQA in Production (2023-2024)"]
+        style Models fill:#ccfbf1,stroke:#000,color:#000
+        L8["Llama 3.1 8B
+32Q / 8KV"] 
+        L70["Llama 3.1 70B
+64Q / 8KV"]
+        M7["Mistral 7B
+32Q / 8KV"]
+        G2["Gemma 2
+16Q / 8KV"]
+    end
 ```
+
+Meta keeps n_kv_heads=8 constant across model sizes (8B, 70B, 405B), increasing group size as models scale. Larger models have more query heads that can share KV projections without quality loss because their increased capacity compensates for shared representations.
+
+| Model | Query Heads | KV Heads | Group Size | KV/Token |
+|-------|-------------|----------|------------|----------|
+| Llama 3.1 8B | 32 | 8 | 4 | 128 KB |
+| Llama 3.1 70B | 64 | 8 | 8 | 256 KB |
+| Llama 3.1 405B | 128 | 8 | 16 | 512 KB |
+| Mistral 7B | 32 | 8 | 4 | 128 KB |
+| Qwen 2 72B | 28 | 4 | 7 | 64 KB |
+
+## The Design Decision
+
+The choice between MHA, GQA, and MQA reduces to: how many concurrent users must you serve, and what quality loss can you tolerate?
+
+```mermaid
+flowchart LR
+    Q{"Quality-sensitive?"} -->|Yes| MHA["MHA
+Research, small batch"]
+    Q -->|Moderate| GQA["GQA-8
+Production default"]
+    Q -->|Throughput-first| MQA["MQA
+Max concurrency"]
+    style MHA fill:#ffe4e6,stroke:#000,color:#000
+    style GQA fill:#dbeafe,stroke:#000,color:#000
+    style MQA fill:#dcfce7,stroke:#000,color:#000
+```
+
+For most production deployments, GQA-8 is the correct answer. It provides 4x memory reduction with negligible quality impact, and the entire industry has converged on this configuration.
 
 ---
 
-## The Tradeoff Triangle: Memory vs Quality vs Training Cost
+## FAQ
 
-Every attention mechanism design sits somewhere on a three-dimensional tradeoff surface:
+**Q1: Does GQA reduce compute (FLOPs) or only memory?**
+GQA primarily reduces KV cache memory and memory bandwidth during decoding. The compute savings are modest because the query projections (which dominate prefill FLOPs) remain unchanged. The real benefit is fitting more concurrent sequences in GPU memory.
+
+**Q2: Can I use different group sizes for different layers?**
+Yes, though no major production model does this yet. Research suggests early layers benefit from more KV heads (diverse patterns needed for token mixing) while later layers can share more aggressively. This is an active research direction.
+
+**Q3: Why not just use MQA everywhere if it saves 32x memory?**
+MQA forces all query heads to form attention patterns from identical keys and values. For simple tasks this works fine, but multi-hop reasoning and long-form generation degrade measurably (0.5-2% across benchmarks). The compounding effect across multiple reasoning steps makes this gap noticeable in production.
+
+**Q4: How does GQA interact with KV cache quantization?**
+They compose multiplicatively. GQA-8 gives 4x compression, INT8 quantization gives another 2x, yielding 8x total reduction. This combination is the standard production configuration for high-throughput serving.
+
+**Q5: What is the relationship between GQA and Multi-Latent Attention (MLA)?**
+MLA (DeepSeek-V2, covered in module 3.4) takes a fundamentally different approach: it compresses the entire KV representation into a low-rank latent space rather than reducing the number of heads. MLA achieves higher compression ratios than GQA but requires architectural changes that prevent simple checkpoint conversion.
+
+**Q6: Does the group size affect training stability?**
+No significant instability has been reported for group sizes between 2 and 16. However, group sizes below 4 KV heads provide diminishing memory returns while introducing measurable quality loss, which is why the industry converges on 4-8 KV heads.
+
+**Q7: Can I convert a GQA model back to MHA for fine-tuning?**
+Technically yes (duplicate each KV head group_size times), but this defeats the memory advantage during inference. A better approach is to fine-tune in GQA configuration directly, which preserves the serving efficiency.
+
+**Q8: Why does Meta keep exactly 8 KV heads across all Llama 3 sizes?**
+Eight KV heads provide sufficient representational diversity for most tasks while giving a clean power-of-two group size for larger models. It also simplifies the serving infrastructure: one KV cache management strategy works across the entire model family.
+
+---
+
+## References
+
+1. Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need." arXiv:1911.02150.
+2. Ainslie, J., Lee-Thorp, J., de Jong, M., Zemlyanskiy, Y., Lebron, F., & Sanghai, S. (2023). "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints." EMNLP 2023. arXiv:2305.13245.
+3. Touvron, H., et al. (2023). "Llama 2: Open Foundation and Fine-Tuned Chat Models." arXiv:2307.09288.
+4. Jiang, A. Q., et al. (2023). "Mistral 7B." arXiv:2310.06825.
+5. Dubey, A., et al. (2024). "The Llama 3 Herd of Models." arXiv:2407.21783.

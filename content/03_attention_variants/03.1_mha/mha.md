@@ -1,25 +1,13 @@
 # 3.1 Multi-Head Attention (MHA)
 
-Every token your model generates requires reading from the KV cache, and the size of that cache is determined entirely by your attention mechanism's design. This module traces the architectural evolution that took KV cache memory from "unaffordable at scale" to "hundreds of concurrent users on a single GPU." Understanding this progression is not optional for inference engineers: it is the single most impactful design decision affecting your serving costs.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.1_mha/lab.ipynb)
+[![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.cloud/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.1_mha/lab.ipynb)
 
-## Back-Reference: What You Already Know
+Multi-Head Attention is the original attention mechanism from "Attention Is All You Need" (Vaswani et al., 2017). Every attention head gets its own independent Key and Value projections, giving the model maximum representational power. This module explains how MHA works, derives its KV cache cost, and shows why this design becomes the dominant memory bottleneck during inference at scale.
 
-From Module 02.1, you know the KV cache stores K and V projection tensors for every layer and every token in the sequence. For Llama 3.1 8B with GQA (8 KV heads, 128 head dimension, 32 layers, FP16), each token costs approximately 128 KB of GPU memory. You saw how this grows linearly with sequence length and batch size, creating the fundamental memory pressure that limits concurrent serving.
+## How MHA Works
 
-What Module 02.1 did not explain is *why* Llama uses 8 KV heads instead of 32, or why earlier models like GPT-3 used 96 KV heads matching their query heads exactly. The answer lies in a three-stage evolution of the attention mechanism itself, each stage trading a small amount of model quality for a dramatic reduction in KV cache size.
-
----
-
-
-![Attention Variants Memory Comparison](images/attention_variants_memory.png)
-
-## Multi-Head Attention (MHA): The Original Design
-
-Multi-Head Attention, introduced in "Attention Is All You Need" (Vaswani et al., 2017), gives every attention head its own independent Key and Value projections. If your model has `n_heads` query heads, it also has `n_heads` KV heads. Each head independently attends to different aspects of the input: one head might track syntactic relationships, another semantic similarity, another positional proximity.
-
-### The Architecture
-
-In MHA, the input hidden state `x` of dimension `d_model` is projected through three separate weight matrices per head:
+In MHA, the input hidden state of dimension `d_model` is projected through three weight matrices per head. Each head independently attends to different aspects of the input: one head might track syntactic relationships, another semantic similarity, another positional proximity.
 
 ```
 Q_i = x @ W_Q_i    # shape: [seq_len, head_dim]
@@ -27,55 +15,97 @@ K_i = x @ W_K_i    # shape: [seq_len, head_dim]
 V_i = x @ W_V_i    # shape: [seq_len, head_dim]
 ```
 
-where `i` ranges from 1 to `n_heads`, and `head_dim = d_model / n_heads`.
-
-Each head computes attention independently:
+where `i` ranges from 1 to `n_heads`, and `head_dim = d_model / n_heads`. Each head computes attention independently, then outputs are concatenated and projected back:
 
 ```
 Attention_i = softmax(Q_i @ K_i^T / sqrt(head_dim)) @ V_i
-```
-
-The outputs are concatenated and projected back to `d_model`:
-
-```
 Output = Concat(Attention_1, ..., Attention_n) @ W_O
 ```
 
-### KV Cache Memory Formula for MHA
+```mermaid
+flowchart LR
+    X[Input x] --> QP[Q Projections<br/>n_heads x W_Q]
+    X --> KP[K Projections<br/>n_heads x W_K]
+    X --> VP[V Projections<br/>n_heads x W_V]
+    QP --> ATT[Attention<br/>per head]
+    KP --> ATT
+    VP --> ATT
+    ATT --> CAT[Concat]
+    CAT --> OUT[Output<br/>W_O projection]
+
+    style X fill:#f3f4f6,stroke:#000,color:#000
+    style QP fill:#dbeafe,stroke:#000,color:#000
+    style KP fill:#dcfce7,stroke:#000,color:#000
+    style VP fill:#dcfce7,stroke:#000,color:#000
+    style ATT fill:#f3e8ff,stroke:#000,color:#000
+    style CAT fill:#fef3c7,stroke:#000,color:#000
+    style OUT fill:#dbeafe,stroke:#000,color:#000
+```
+
+The key property: every head has its own K and V, meaning `n_kv_heads = n_heads`. This gives maximum expressiveness but maximum KV cache cost.
+
+## KV Cache Memory Formula
 
 During autoregressive inference, every generated token adds its K and V vectors to the cache for ALL heads across ALL layers:
 
 ```
-KV_cache_per_token (MHA) = 2 × n_kv_heads × head_dim × n_layers × bytes_per_element
+KV_cache_per_token = 2 x n_heads x head_dim x n_layers x bytes_per_element
 ```
 
-Since `n_kv_heads = n_heads` in MHA:
+The factor of 2 accounts for both K and V tensors stored per head per layer.
 
-```
-KV_cache_per_token (MHA) = 2 × n_heads × head_dim × n_layers × bytes_per_element
-```
+```mermaid
+flowchart LR
+    subgraph Per_Token_Cost[Per Token Cost]
+        K[K vectors<br/>n_heads x head_dim] --> LAYER[x n_layers]
+        V[V vectors<br/>n_heads x head_dim] --> LAYER
+        LAYER --> TOTAL[Total bytes<br/>per token]
+    end
 
-### Concrete Example: GPT-3 175B
-
-GPT-3 uses pure MHA with these parameters:
-- `n_heads = 96`
-- `head_dim = 128`
-- `n_layers = 96`
-- `dtype = FP16 (2 bytes)`
-
-```
-KV per token = 2 × 96 × 128 × 96 × 2 = 4,718,592 bytes ≈ 4.5 MB/token
+    style K fill:#dcfce7,stroke:#000,color:#000
+    style V fill:#dcfce7,stroke:#000,color:#000
+    style LAYER fill:#fef3c7,stroke:#000,color:#000
+    style TOTAL fill:#ffe4e6,stroke:#000,color:#000
 ```
 
-For a 2048-token context: `4.5 MB × 2048 = 9.2 GB` of KV cache per request. With 8 concurrent users at 2K context, you need 73.6 GB just for KV cache, consuming nearly all of an 80 GB A100.
+## Concrete Example: GPT-3 175B
 
-### Why MHA Works for Training but Fails for Serving
+GPT-3 uses pure MHA with 96 heads, head dimension 128, 96 layers, in FP16:
 
-During training, you process the entire sequence in parallel. The KV projections are computed once and used immediately. There is no cache because you already have all tokens. The memory cost is proportional to the batch size and sequence length, but it is transient.
+```
+KV per token = 2 x 96 x 128 x 96 x 2 = 4,718,592 bytes = 4.5 MB/token
+```
 
-During inference, the KV cache persists for the entire generation. Each new token requires reading the full cache from memory (memory-bandwidth bound), and the cache must remain allocated until the request completes. This is the fundamental asymmetry: a mechanism designed for parallel training creates an unbearable memory burden during sequential generation.
+For a 2048-token context: `4.5 MB x 2048 = 9.2 GB` per request. Eight concurrent users at 2K context need 73.6 GB just for KV cache, consuming nearly all of an 80 GB A100. This is why MHA does not scale for serving.
 
-### Models Using MHA
+## Why MHA Works for Training but Fails for Serving
+
+During training, the entire sequence is processed in parallel. KV projections are computed once and used immediately with no persistent cache. Memory cost is transient.
+
+During inference, the KV cache persists for the entire generation. Each new token requires reading the full cache from memory (memory bandwidth bound), and the cache remains allocated until the request completes. A mechanism designed for parallel training creates an unbearable memory burden during sequential generation.
+
+```mermaid
+flowchart LR
+    subgraph Training[Training: Parallel]
+        T1[All tokens<br/>processed at once] --> T2[KV computed<br/>and discarded]
+    end
+
+    subgraph Inference[Inference: Sequential]
+        I1[Token generated] --> I2[KV cached<br/>in HBM] --> I3[Cache grows<br/>linearly]
+    end
+
+    style T1 fill:#dcfce7,stroke:#000,color:#000
+    style T2 fill:#dcfce7,stroke:#000,color:#000
+    style I1 fill:#ffe4e6,stroke:#000,color:#000
+    style I2 fill:#ffe4e6,stroke:#000,color:#000
+    style I3 fill:#ffe4e6,stroke:#000,color:#000
+```
+
+## The Bandwidth Bottleneck
+
+Loading KV cache from HBM dominates decode time. For GPT-3 with a 2K context, each decode step loads 9.2 GB of KV data. On an A100 with 2 TB/s HBM bandwidth, just reading the cache takes 4.6 ms per token. The actual attention compute (matrix multiplies on small head_dim vectors) is negligible by comparison. MHA makes the decode step memory bandwidth bound, not compute bound.
+
+## Models Using MHA
 
 | Model | Year | n_heads | head_dim | Layers | KV/token |
 |-------|------|---------|----------|--------|----------|
@@ -85,85 +115,36 @@ During inference, the KV cache persists for the entire generation. Each new toke
 | OPT-175B | 2022 | 96 | 128 | 96 | 4.5 MB |
 | BLOOM-176B | 2022 | 112 | 128 | 70 | 4.0 MB |
 
-The pattern is clear: as models scale, MHA's KV cache becomes the dominant memory consumer, leaving less room for batching concurrent requests.
+The pattern is clear: as models scale, MHA's KV cache becomes the dominant memory consumer, leaving less room for batching concurrent requests. This motivates the variants covered in subsequent modules (MQA in 3.2, GQA in 3.3).
 
----
+## FAQ
 
-## Multi-Query Attention (MQA): Radical Compression
+**Q: Why not just use fewer heads to reduce KV cache?**
+Reducing heads shrinks model capacity. Each head captures different relationship patterns (syntactic, semantic, positional). Removing heads degrades model quality, especially on complex reasoning tasks.
 
-In 2019, Noam Shazeer published "Fast Transformer Decoding: One Write-Head is All You Need," proposing a startlingly simple modification: instead of giving each attention head its own KV projections, share a single K and a single V across ALL query heads.
+**Q: Does MHA waste memory during prefill?**
+No. During prefill, all tokens are processed in parallel and KV is computed in one pass. The waste occurs during decode, where the cache must persist and grow with each generated token.
 
-### The Key Insight
+**Q: How does head_dim relate to d_model?**
+By construction, `head_dim = d_model / n_heads`. A 4096-dimensional model with 32 heads uses head_dim=128. Larger head_dim means more expressive per-head representations but more KV bytes per token.
 
-Shazeer observed that during inference, the memory bandwidth consumed by loading KV cache from HBM dominates the compute time. The attention computation itself is fast (it's just matrix multiplies on small head_dim vectors). The bottleneck is moving 4.5 MB of KV data per token from HBM to the compute units for every single generated token.
+**Q: Can you prune individual heads after training?**
+Yes. Head pruning (Michel et al., 2019) removes less important heads post-training. However, pruning requires careful evaluation and retraining. MQA and GQA achieve similar cache savings architecturally without post-hoc surgery.
 
-If all query heads share the same K and V, you only need to store and load one set of KV vectors per layer, regardless of how many query heads you have.
+**Q: Is the attention matrix square?**
+During prefill, yes: shape is [seq_len, seq_len]. During decode, it is [1, seq_len] since you compute attention for one new token against all cached keys. This asymmetry is why decode is bandwidth bound.
 
-### The Architecture
+**Q: Why does every layer need its own KV cache?**
+Each transformer layer learns different abstractions. Layer 1 might attend to surface syntax while layer 30 attends to high-level semantics. Sharing KV across layers would collapse these learned distinctions.
 
-```
-# MQA: n_heads query projections, but only ONE KV projection
-Q_i = x @ W_Q_i    # i = 1..n_heads, shape: [seq_len, head_dim]
-K   = x @ W_K      # SINGLE shared K, shape: [seq_len, head_dim]
-V   = x @ W_V      # SINGLE shared V, shape: [seq_len, head_dim]
+**Q: What fraction of A100 memory does KV cache typically consume?**
+For large MHA models at production context lengths (4K-8K tokens) with reasonable batch sizes (8-32), KV cache easily consumes 50-80% of available HBM. This leaves minimal room for model weights and activations.
 
-# Each query head attends using the SAME K and V
-Attention_i = softmax(Q_i @ K^T / sqrt(head_dim)) @ V
-```
+## References
 
-### KV Cache Memory Formula for MQA
-
-```
-KV_cache_per_token (MQA) = 2 × 1 × head_dim × n_layers × bytes_per_element
-```
-
-Notice `n_kv_heads = 1` regardless of how many query heads exist.
-
-### Compression Ratio
-
-For a model with `n_heads` query heads:
-
-```
-MQA_compression = n_heads / 1 = n_heads
-```
-
-A 32-head model gets 32× KV cache reduction. A 96-head model like GPT-3 would get 96× reduction.
-
-### Concrete Example: PaLM (if MQA)
-
-PaLM 540B uses MQA with:
-- `n_heads = 48` (query heads)
-- `n_kv_heads = 1` (MQA)
-- `head_dim = 256`
-- `n_layers = 118`
-- `dtype = FP16`
-
-```
-KV per token = 2 × 1 × 256 × 118 × 2 = 120,832 bytes ≈ 118 KB/token
-```
-
-Compare to MHA equivalent: `2 × 48 × 256 × 118 × 2 = 5.8 MB/token`. That is a 48× reduction.
-
-### The Quality Cost
-
-The compression is not free. When all query heads share the same KV representation, the model loses the ability to attend to different aspects of the input with different head-specific Key/Value spaces. Empirical results from Shazeer (2019) and follow-up work show:
-
-- **Short-context tasks (< 512 tokens)**: Negligible quality difference. The shared KV representation captures sufficient information for most heads.
-- **Long-context tasks (> 2K tokens)**: Measurable degradation (0.5-2% on benchmarks). Different heads genuinely benefit from specialized KV projections when the sequence is long enough to contain diverse information.
-- **Knowledge-intensive tasks**: Moderate degradation. Tasks like open-domain QA where the model must recall specific facts from long contexts suffer more than summarization tasks.
-
-### Training Consideration
-
-Training an MQA model from scratch requires no modification to the training procedure. The model simply has fewer parameters in the KV projection (by a factor of `n_heads`). However, converting an existing MHA checkpoint to MQA is non-trivial. Shazeer (2019) found that "uptrained" MQA models (pre-trained with MHA, then fine-tuned with shared KV) recover most but not all of the quality difference within 5-10% additional training compute.
-
-### Models Using MQA
-
-| Model | Year | Query Heads | KV Heads | Compression |
-|-------|------|-------------|----------|-------------|
-| PaLM | 2022 | 48 | 1 | 48× |
-| Falcon-40B | 2023 | 64 | 1 | 64× |
-| StarCoder | 2023 | 48 | 1 | 48× |
-| MPT-30B | 2023 | 64 | 1 | 64× |
-
----
-
+1. Vaswani, A., Shazeer, N., Parmar, N., et al. (2017). "Attention Is All You Need." NeurIPS 2017.
+2. Brown, T., Mann, B., Ryder, N., et al. (2020). "Language Models are Few-Shot Learners." NeurIPS 2020. (GPT-3)
+3. Zhang, S., Roller, S., Goyal, N., et al. (2022). "OPT: Open Pre-trained Transformer Language Models." arXiv:2205.01068.
+4. Scao, T.L., Fan, A., Akiki, C., et al. (2022). "BLOOM: A 176B-Parameter Open-Access Multilingual Language Model." arXiv:2211.05100.
+5. Michel, P., Levy, O., Neubig, G. (2019). "Are Sixteen Heads Really Better than One?" NeurIPS 2019.
+6. Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need." arXiv:1911.02150.

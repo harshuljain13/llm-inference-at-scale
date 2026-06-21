@@ -1,210 +1,170 @@
-# 3.5 FlashAttention: Why Standard Attention is Slow
+# 3.5 The Flash Attention Problem: Why Standard Attention is Slow
 
-> The gap between GPU compute capability and memory bandwidth grows every hardware generation. FlashAttention exploits this gap by restructuring attention to minimize HBM accesses, turning a memory-bound operation into a compute-bound one.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.5_flash_attention_problem/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.cloud/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.5_flash_attention_problem/lab.ipynb)
+
+Standard attention computes exact results but forces the GPU to write enormous intermediate matrices to slow main memory. The compute units sit idle while bytes shuttle back and forth. This module quantifies exactly where the bottleneck lives and why it worsens quadratically with sequence length.
 
 ---
 
-## The Problem: Standard Attention is Memory-Wasteful
+## The Memory Hierarchy Gap
 
-Standard scaled dot-product attention computes the following for each head:
+Modern GPUs have two memory tiers with drastically different characteristics. HBM (High Bandwidth Memory) provides 80 GB of capacity at roughly 2 TB/s on an A100. SRAM (on-chip shared memory) provides only 20 MB total but delivers bandwidth exceeding 19 TB/s. The ratio matters: SRAM is nearly 10x faster per byte, but 4000x smaller.
+
+```mermaid
+flowchart LR
+    subgraph GPU["GPU Memory Hierarchy"]
+        direction LR
+        SRAM["SRAM<br/>20 MB<br/>19 TB/s"]
+        HBM["HBM<br/>80 GB<br/>2 TB/s"]
+    end
+    SRAM -->|"10x faster"| HBM
+    style SRAM fill:#dcfce7,stroke:#000,color:#000
+    style HBM fill:#fef3c7,stroke:#000,color:#000
+    style GPU fill:#f3f4f6,stroke:#000,color:#000
+```
+
+Any operation that repeatedly reads and writes large tensors to HBM becomes memory-bound regardless of how much arithmetic it performs. Standard attention does exactly this.
+
+---
+
+## Standard Attention: Three Kernels, Two Wasted Round-Trips
+
+Scaled dot-product attention for one head with sequence length N and head dimension d:
 
 ```
 Output = softmax(Q @ K^T / sqrt(d)) @ V
 ```
 
-where Q, K, V have shape [N, d] (sequence length N, head dimension d). The intermediate attention matrix S = Q @ K^T has shape [N, N]. For a 4096-token sequence with 128-dimensional heads, this matrix contains 16.7 million elements per head.
+Q, K, V each have shape [N, d]. The intermediate attention matrix S = Q @ K^T has shape [N, N]. Standard implementations launch three separate CUDA kernels, and between kernels every intermediate must round-trip through HBM.
 
-The critical issue is not the FLOPs. The critical issue is where those 16.7 million elements live during computation.
-
-### Standard Attention: Step by Step HBM Traffic
-
-On a GPU, HBM (High Bandwidth Memory) is the main memory (80 GB on A100), and SRAM is the fast on-chip memory (20 MB on A100, split across streaming multiprocessors). Standard attention proceeds as follows:
-
-```
-Step 1: Compute S = Q @ K^T
-  Read:  Q [N, d] from HBM      -> N x d x 2 bytes
-  Read:  K [N, d] from HBM      -> N x d x 2 bytes
-  Write: S [N, N] to HBM        -> N x N x 2 bytes
-
-Step 2: Compute P = softmax(S)
-  Read:  S [N, N] from HBM      -> N x N x 2 bytes
-  Write: P [N, N] to HBM        -> N x N x 2 bytes
-
-Step 3: Compute O = P @ V
-  Read:  P [N, N] from HBM      -> N x N x 2 bytes
-  Read:  V [N, d] from HBM      -> N x d x 2 bytes
-  Write: O [N, d] to HBM        -> N x d x 2 bytes
-```
-
-Each step launches a separate CUDA kernel. Between kernels, all intermediate results must round-trip through HBM. The attention matrix S and softmax output P each have N^2 elements, and both are written then read back. This is pure waste: these intermediates are consumed immediately and never needed again.
-
-### Counting HBM Bytes
-
-Total HBM reads and writes for standard attention (one head, FP16):
-
-```
-Reads:  N*d + N*d + N^2 + N^2 + N*d = 3Nd + 2N^2  elements
-Writes: N^2 + N^2 + N*d             = Nd + 2N^2    elements
-Total:  4Nd + 4N^2 elements
-Bytes:  (4Nd + 4N^2) x 2  (FP16)
+```mermaid
+flowchart LR
+    subgraph K1["Kernel 1"]
+        QK["S = Q @ K^T"]
+    end
+    subgraph K2["Kernel 2"]
+        SM["P = softmax(S)"]
+    end
+    subgraph K3["Kernel 3"]
+        PV["O = P @ V"]
+    end
+    QK -->|"Write S [N,N]<br/>to HBM"| SM
+    SM -->|"Write P [N,N]<br/>to HBM"| PV
+    style K1 fill:#dbeafe,stroke:#000,color:#000
+    style K2 fill:#f3e8ff,stroke:#000,color:#000
+    style K3 fill:#dcfce7,stroke:#000,color:#000
+    style QK fill:#dbeafe,stroke:#000,color:#000
+    style SM fill:#f3e8ff,stroke:#000,color:#000
+    style PV fill:#dcfce7,stroke:#000,color:#000
 ```
 
-For N=4096, d=128:
-
-```
-Linear terms:    4Nd = 4 x 4096 x 128 = 2,097,152 elements
-Quadratic terms: 4N^2 = 4 x 4096^2 = 67,108,864 elements
-Total elements:  69,206,016
-Total bytes:     138.4 MB per head
-For 32 heads:    4.4 GB of HBM traffic for ONE attention layer
-```
-
-The quadratic terms are 32x larger than the linear terms. The attention matrix dominates HBM traffic.
-
-Compare to the actual useful compute:
-
-```
-FLOPs for Q @ K^T:  2 x N x N x d = 2 x 4096^2 x 128 = 4.29 billion
-FLOPs for P @ V:    2 x N x N x d = 4.29 billion
-Total:              8.59 billion FLOPs per head
-For 32 heads:       274.9 billion FLOPs
-```
-
-Arithmetic intensity of standard attention:
-
-```
-274.9 billion FLOPs / 4.4 GB = 62.5 FLOPs/byte
-
-A100 ridge point: 312 TFLOPS / 2 TB/s = 156 FLOPs/byte
-
-62.5 < 156  =>  Standard attention is MEMORY-BOUND on A100
-```
-
-This is paradoxical. Attention is a sequence of matrix multiplications, which should be compute-bound. But the mandatory materialization of the N^2 intermediate matrix forces so much HBM traffic that the operation becomes memory-bound. The GPU's compute units sit idle while bytes shuttle between HBM and the chip.
-
-### IO Complexity of Standard Attention
-
-Formally, standard attention requires:
-
-```
-HBM accesses = Theta(Nd + N^2)
-```
-
-The Nd term accounts for reading Q, K, V and writing O (unavoidable, as these tensors live in HBM). The N^2 term accounts for materializing S and P. Since d is typically 64-128 and N ranges from hundreds to hundreds of thousands, the condition N > d always holds in practice, making the N^2 term dominant.
-
-The question FlashAttention answers: can we compute exact attention with only O(Nd) HBM accesses, eliminating the quadratic term entirely?
+The attention matrix S and softmax output P are each N^2 elements. Both are written to HBM then immediately read back. These intermediates are consumed once and never needed again, yet they dominate memory traffic.
 
 ---
 
-## The FlashAttention Algorithm: Tiling + Online Softmax
+## Quantifying the HBM Traffic
 
-FlashAttention achieves sub-quadratic HBM access by never materializing the full N x N attention matrix. Instead, it computes attention in tiles that fit in SRAM, using an online softmax algorithm to accumulate correct results without needing the full row of attention scores.
+Total HBM reads and writes for one head in FP16:
 
-### Why Tiling Alone is Insufficient
+| Term | Elements | Source |
+|------|----------|--------|
+| Read Q, K, V (3x) | 3Nd | Input tensors |
+| Write S | N^2 | Kernel 1 output |
+| Read S for softmax | N^2 | Kernel 2 input |
+| Write P | N^2 | Kernel 2 output |
+| Read P for matmul | N^2 | Kernel 3 input |
+| Read V, Write O | 2Nd | Kernel 3 |
+| **Total** | **5Nd + 4N^2** | |
 
-A naive tiling approach would partition the computation into blocks but still require the full attention matrix. The obstacle is softmax: computing softmax(row) requires knowing the maximum value in the entire row (for numerical stability) and the sum of exponentials across the entire row. Both require a full pass over all N attention scores for each query position.
+For N=4096, d=128, 32 heads:
 
-```
-Standard softmax for row i of attention matrix:
-
-  s_ij = q_i @ k_j / sqrt(d)        for all j in [0, N)
-  m_i  = max(s_i0, s_i1, ..., s_i(N-1))    # need ALL scores
-  l_i  = sum(exp(s_ij - m_i))               # need ALL scores
-  p_ij = exp(s_ij - m_i) / l_i
-  o_i  = sum(p_ij * v_j)
-```
-
-If you only compute a tile of scores (say columns j=0..B_c), you do not know if a larger score exists in columns B_c..N. Your softmax would be wrong.
-
-### The Online Softmax Trick
-
-The key insight (Milakov and Gimelshein, 2018; refined by Dao et al., 2022) is that softmax can be computed incrementally. You maintain running statistics (maximum and sum of exponentials) that are corrected as new tiles arrive.
-Consider processing tiles of K in order. After processing tile j (columns j*B_c to (j+1)*B_c - 1):
-
-```
-State after tile j:
-  m_i^(j)  = max of all scores seen so far (across tiles 0..j)
-  l_i^(j)  = sum of exp(s_ik - m_i^(j)) for all k seen so far
-  o_i^(j)  = sum of exp(s_ik - m_i^(j)) * v_k / l_i^(j) for all k seen so far
-```
-
-When a new tile j+1 arrives with local scores s_i,new:
-
-```
-Algorithm: Online Softmax Update
-
-1. Compute new tile scores: s_i,new = q_i @ K_new^T / sqrt(d)
-2. Find new tile maximum:   m_new = max(s_i,new)
-3. Update global maximum:   m_i^(j+1) = max(m_i^(j), m_new)
-4. Correction factor:       alpha = exp(m_i^(j) - m_i^(j+1))
-5. New tile exponentials:    exp_new = exp(s_i,new - m_i^(j+1))
-6. Update running sum:      l_i^(j+1) = alpha * l_i^(j) + sum(exp_new)
-7. Update output:           o_i^(j+1) = alpha * o_i^(j) + exp_new @ V_new
-8. Final normalization:     output_i = o_i^(final) / l_i^(final)
-```
-
-The correction factor alpha rescales all previously accumulated values to account for the new maximum. If the new tile contains a larger score than anything seen before, previous contributions are downweighted. If the new tile has smaller scores, alpha equals 1 and previous values are unchanged.
-
-This is mathematically exact. No approximation is involved. The final output is bit-for-bit identical to standard attention (up to floating-point associativity).
-
-### The Full FlashAttention Forward Pass
-
-With online softmax in hand, the algorithm tiles both Q (into blocks of B_r rows) and K, V (into blocks of B_c rows):
-
-```
-FlashAttention Forward (one head):
-
-Input:  Q, K, V in HBM, each [N, d]
-Output: O in HBM, [N, d]
-
-Choose block sizes B_r, B_c such that:
-  (2*B_r + B_c)*d + B_r*B_c fits in SRAM
-
-for i = 0, 1, ..., ceil(N/B_r) - 1:
-    Load Q_i = Q[i*B_r : (i+1)*B_r] from HBM to SRAM     # [B_r, d]
-    Initialize: o_i = 0, l_i = 0, m_i = -inf              # in SRAM
-
-    for j = 0, 1, ..., ceil(N/B_c) - 1:
-        Load K_j = K[j*B_c : (j+1)*B_c] from HBM to SRAM # [B_c, d]
-        Load V_j = V[j*B_c : (j+1)*B_c] from HBM to SRAM # [B_c, d]
-
-        Compute S_ij = Q_i @ K_j^T / sqrt(d)              # [B_r, B_c] in SRAM
-        Compute m_ij = rowmax(S_ij)                        # [B_r]
-        Update m_new = max(m_i, m_ij)                      # [B_r]
-        Compute P_ij = exp(S_ij - m_new)                   # [B_r, B_c] in SRAM
-        Compute l_new = exp(m_i - m_new) * l_i + rowsum(P_ij)
-        Update o_i = exp(m_i - m_new) * o_i + P_ij @ V_j
-        Update m_i = m_new, l_i = l_new
-
-    Write O_i = o_i / l_i to HBM                          # [B_r, d]
-```
-
-The attention matrix S_ij is computed in SRAM, used immediately for the matmul with V_j, and then discarded. It never touches HBM. The only HBM writes are the final output blocks O_i.
-
-### SRAM Budget Calculation
-
-For A100 with 192 KB shared memory per SM (M = 192 KB = 96K FP16 elements):
-
-```
-Required SRAM per tile (in FP16 elements):
-  Q_i:   B_r x d
-  K_j:   B_c x d
-  V_j:   B_c x d
-  S_ij:  B_r x B_c
-  O_i:   B_r x d
-  Stats: 2 x B_r  (m_i and l_i)
-
-Total = (2*B_r + 2*B_c) * d + B_r * B_c + 2*B_r
-
-With d=128, B_r=128, B_c=128:
-  = (256 + 256) * 128 + 128*128 + 256
-  = 65,536 + 16,384 + 256
-  = 82,176 elements
-  = 164,352 bytes (FP16)
-  = 160.5 KB  <  192 KB  (fits!)
-```
-
-In practice, FlashAttention uses slightly smaller blocks to leave room for registers and other kernel state. The actual block sizes are tuned per GPU architecture.
+- Linear terms: 5Nd = 2.6M elements per head
+- Quadratic terms: 4N^2 = 67.1M elements per head
+- Quadratic dominates by 26x
+- Total bytes (32 heads): ~4.4 GB of HBM traffic for one attention layer
 
 ---
 
+## The Arithmetic Intensity Argument
+
+A100 reaches peak throughput when arithmetic intensity exceeds its ridge point:
+
+```
+Ridge point = 312 TFLOPS / 2 TB/s = 156 FLOPs/byte
+Standard attention = 274.9B FLOPs / 4.4 GB = 62.5 FLOPs/byte
+62.5 < 156 => Standard attention is MEMORY-BOUND on A100
+```
+
+The GPU compute units are underutilized because they wait for HBM data transfers.
+
+```mermaid
+flowchart LR
+    subgraph Roofline["Roofline Classification"]
+        direction LR
+        MB["Standard Attention<br/>62.5 FLOPs/byte<br/>MEMORY-BOUND"]
+        RP["Ridge Point<br/>156 FLOPs/byte"]
+        CB["Target<br/>>156 FLOPs/byte<br/>COMPUTE-BOUND"]
+    end
+    MB --> RP --> CB
+    style MB fill:#ffe4e6,stroke:#000,color:#000
+    style RP fill:#fef3c7,stroke:#000,color:#000
+    style CB fill:#dcfce7,stroke:#000,color:#000
+    style Roofline fill:#f3f4f6,stroke:#000,color:#000
+```
+
+---
+
+## Quadratic Scaling with Sequence Length
+
+The N^2 term means HBM traffic grows quadratically. Doubling sequence length quadruples memory traffic:
+
+| Sequence Length | Attention Matrix Size | HBM Traffic (32 heads, FP16) |
+|----------------|----------------------|------------------------------|
+| 512 | 0.5 MB | 34 MB |
+| 2048 | 8 MB | 537 MB |
+| 4096 | 32 MB | 4.4 GB |
+| 8192 | 128 MB | 17.2 GB |
+| 16384 | 512 MB | 68.7 GB |
+| 32768 | 2 GB | Exceeds A100 HBM |
+
+At 32K tokens, the attention matrix alone exceeds the GPU's entire HBM capacity. Even at moderate lengths, the quadratic traffic dominates wall-clock time.
+
+---
+
+## IO Complexity: The Formal Statement
+
+Standard attention requires Theta(Nd + N^2) HBM accesses. The Nd term is unavoidable (reading inputs, writing outputs). The N^2 term arises solely from materializing intermediates. Since d is typically 64 to 128 and N ranges from hundreds to millions, N >> d always holds, making N^2 dominant.
+
+The question this sets up: can we compute exact attention with only O(Nd) HBM accesses, eliminating the quadratic term entirely? The next module shows the answer is yes.
+
+---
+
+## FAQ
+
+**Q: Is the problem FLOPs or memory?**
+The FLOPs are identical regardless of implementation. The problem is exclusively memory bandwidth. Standard attention forces unnecessary HBM round-trips for intermediate matrices that could remain in fast SRAM.
+
+**Q: Why not just use a larger SRAM?**
+SRAM is expensive silicon area. The A100 has 20 MB total across all SMs. Making SRAM large enough to hold a 4096x4096 attention matrix (32 MB in FP16) would require more area than the entire chip currently uses for compute.
+
+**Q: Does this affect training and inference equally?**
+Yes. Both forward and backward passes materialize the N^2 attention matrix. Training is worse because the backward pass requires re-reading the attention matrix for gradient computation.
+
+**Q: At what sequence length does this become critical?**
+The crossover where quadratic terms exceed linear terms occurs at N > 5d. For d=128, that is N > 640. Virtually all practical sequences exceed this threshold.
+
+**Q: Why can't we just fuse the kernels without algorithmic changes?**
+Kernel fusion alone does not solve the problem because softmax requires a full row reduction (max and sum across all N columns). Without an incremental algorithm, the kernel must still write intermediate results to synchronize across thread blocks.
+
+**Q: Is approximate attention a solution?**
+Approximate methods (Linformer, Performer) reduce the quadratic term but sacrifice exactness. FlashAttention (next module) achieves O(Nd) HBM access while computing exact attention, making approximation unnecessary for the memory problem.
+
+---
+
+## References
+
+1. Dao, T., Fu, D.Y., Ermon, S., Rudra, A., Re, C. (2022). FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. NeurIPS 2022.
+2. Milakov, M., Gimelshein, N. (2018). Online normalizer calculation for softmax. arXiv:1805.02867.
+3. Dao, T. (2023). FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning. ICLR 2024.
+4. Jia, Z., Zaharia, M., Aiken, A. (2019). Beyond Data and Model Parallelism for Deep Neural Networks. MLSys 2019.
+5. NVIDIA. (2023). A100 Tensor Core GPU Architecture Whitepaper.
