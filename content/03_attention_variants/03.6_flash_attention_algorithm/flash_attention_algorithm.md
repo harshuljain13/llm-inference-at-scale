@@ -1,6 +1,6 @@
 # 3.6 FlashAttention: The Algorithm
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.6_flash_attention_algorithm/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.cloud/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.6_flash_attention_algorithm/lab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.6_flash_attention_algorithm/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.6_flash_attention_algorithm/lab.ipynb)
 
 Standard attention materializes the full N x N score matrix in HBM, making it memory-bound. FlashAttention eliminates this materialization by computing attention in tiles that fit entirely in SRAM, fusing all operations into a single kernel pass. The challenge: softmax requires a global maximum across the full row, which seems to demand the full matrix. Online softmax solves this by maintaining running statistics that update incrementally as each tile arrives.
 

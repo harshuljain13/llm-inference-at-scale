@@ -1,7 +1,7 @@
 # 3.1 Multi-Head Attention (MHA)
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.1_mha/lab.ipynb)
-[![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.cloud/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.1_mha/lab.ipynb)
+[![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.1_mha/lab.ipynb)
 
 Multi-Head Attention is the original attention mechanism from "Attention Is All You Need" (Vaswani et al., 2017). Every attention head gets its own independent Key and Value projections, giving the model maximum representational power. This module explains how MHA works, derives its KV cache cost, and shows why this design becomes the dominant memory bottleneck during inference at scale.
 

@@ -1,6 +1,6 @@
 # 3.2 Multi-Query and Grouped-Query Attention
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.2_mqa_gqa/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.cloud/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.2_mqa_gqa/lab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.2_mqa_gqa/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.2_mqa_gqa/lab.ipynb)
 
 Multi-Head Attention (MHA) stores independent Key and Value projections for every attention head. This provides maximum representational capacity but consumes KV cache memory proportional to the number of heads. Multi-Query Attention (MQA) and Grouped-Query Attention (GQA) reduce this cost by sharing KV projections across query heads, trading a small quality margin for dramatically higher serving throughput.
 
@@ -47,6 +47,20 @@ V   = x @ W_V         # one shared projection
 ```
 
 For a 32-head model with head_dim=128 and 32 layers in FP16, MQA stores only 16 KB per token compared to 512 KB for MHA. This 32x compression enables hundreds of concurrent users on a single GPU. The cost: all query heads must form their attention patterns from identical key-value representations, limiting the model's ability to attend to different aspects of the input simultaneously.
+
+## The MQA Tradeoff
+
+MQA achieves maximum KV cache compression (one head serves all queries), but this comes at a real cost:
+
+1. **Quality degradation**: All query heads share a single Key/Value representation. Complex queries that need diverse retrieval patterns are forced through a single bottleneck. Published results show 0.5-1.5% accuracy drops on multi-hop reasoning tasks.
+
+2. **Training instability**: With one KV head, gradient updates from all query heads concentrate on a single projection. This can cause oscillation during training, requiring lower learning rates.
+
+3. **No recovery path**: Unlike GQA (where you can tune the group size), MQA has no knob to turn. If quality is insufficient, you must retrain with more heads.
+
+4. **Inference advantage shrinks at scale**: MQA saves memory only on the KV cache. For large models (70B+), weights dominate VRAM anyway, so the relative savings from 8 heads to 1 head matter less.
+
+This is why no major model released after 2023 uses MQA. GQA at 8 heads gives 87% of the memory savings with essentially zero quality loss.
 
 ## Grouped-Query Attention (GQA)
 

@@ -1,6 +1,6 @@
 # 3.7 FlashAttention in Practice
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.7_flash_attention_practice/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.cloud/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.7_flash_attention_practice/lab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.7_flash_attention_practice/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.7_flash_attention_practice/lab.ipynb)
 
 FlashAttention is exact, not approximate. It computes identical results to standard attention while eliminating the N² intermediate from HBM. This module covers when FlashAttention helps, when it does not, how inference engines integrate it, and how to use it in practice.
 
