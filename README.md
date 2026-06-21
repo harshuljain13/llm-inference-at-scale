@@ -53,7 +53,7 @@ Start reading with [Chapter 00: The Transformer at Inference Time](content/00_tr
 
 ## 📚 Table of Contents
 
-> 12 chapters, 59 modules. Each module is a focused 8-10 minute read with a companion lab.
+> 12 chapters, ~55 modules. Each module is a focused 8-10 minute read with a companion lab.
 
 ### Part I: Foundations
 
@@ -73,17 +73,15 @@ Start reading with [Chapter 00: The Transformer at Inference Time](content/00_tr
 | 1.1 | GPU Memory Hierarchy | [gpu_memory.md](content/01_gpu_hardware/01.1_gpu_memory_hierarchy/gpu_memory.md) |
 | 1.2 | The Roofline Model | [roofline_fundamentals.md](content/01_gpu_hardware/01.2_roofline_model/roofline_fundamentals.md) |
 
-**Chapter 02: Sizing and Serving** (3 modules)
+**Chapter 02: Sizing and Serving** (1 module)
 
 | # | Module | Path |
 |---|--------|------|
 | 2.1 | Capacity Planning | [capacity_planning.md](content/02_sizing_and_serving/02.1_capacity_planning/capacity_planning.md) |
-| 2.2 | Batch Size and Throughput | [batch_size_and_throughput.md](content/02_sizing_and_serving/02.2_batch_size_and_throughput/batch_size_and_throughput.md) |
-| 2.3 | Instance Selection | [instance_selection.md](content/02_sizing_and_serving/02.3_instance_selection/instance_selection.md) |
 
 ### Part II: Optimizations
 
-**Chapter 03: Attention Variants** (7 modules)
+**Chapter 03: Attention Variants** (6 modules)
 
 | # | Module | Path |
 |---|--------|------|
@@ -91,9 +89,7 @@ Start reading with [Chapter 00: The Transformer at Inference Time](content/00_tr
 | 3.2 | MQA and GQA | [mqa_gqa.md](content/03_attention_variants/03.2_mqa_gqa/mqa_gqa.md) |
 | 3.3 | GQA Deep Dive | [gqa_deep_dive.md](content/03_attention_variants/03.3_gqa_deep_dive/gqa_deep_dive.md) |
 | 3.4 | Multi-Latent Attention (MLA) | [multi_latent_attention.md](content/03_attention_variants/03.4_mla/multi_latent_attention.md) |
-| 3.5 | FlashAttention: Why Standard Attention is Slow | [flash_attention_problem.md](content/03_attention_variants/03.5_flash_attention_problem/flash_attention_problem.md) |
-| 3.6 | FlashAttention: The Algorithm | [flash_attention_algorithm.md](content/03_attention_variants/03.6_flash_attention_algorithm/flash_attention_algorithm.md) |
-| 3.7 | FlashAttention: In Practice | [flash_attention_practice.md](content/03_attention_variants/03.7_flash_attention_practice/flash_attention_practice.md) |
+| 3.5 | FlashAttention | [flash_attention.md](content/03_attention_variants/03.5_flash_attention/flash_attention.md) |
 
 **Chapter 04: KV Cache Engineering** (5 modules)
 
@@ -178,7 +174,7 @@ Start reading with [Chapter 00: The Transformer at Inference Time](content/00_tr
 | 11.4 | Multi-Model Gateway | [multi_model_gateway.md](content/11_system_designs/10.4_multi_model_gateway/multi_model_gateway.md) |
 | 11.5 | Agentic Workload | [agentic_workload.md](content/11_system_designs/10.5_agentic_workload/agentic_workload.md) |
 
-**Total: 12 chapters, 55 modules.**
+**Total: 12 chapters, ~55 modules.**
 
 ---
 

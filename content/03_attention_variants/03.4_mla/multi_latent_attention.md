@@ -2,7 +2,7 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.4_mla/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/03_attention_variants/03.4_mla/lab.ipynb)
 
-GQA reduces KV cache by sharing heads (32 query heads share 8 KV heads = 4x savings). But each KV head still stores 128 numbers per token. MLA asks: what if we compress those 128 numbers into just 9 numbers before caching?
+GQA reduces KV cache by sharing heads (32 query heads share 8 KV heads = 4x savings). But each KV head still stores 128 numbers per token. MLA asks: what if we compress ALL the key/value information into a single small vector before caching?
 
 That is exactly what DeepSeek-V2 does. Instead of storing full key/value vectors, it stores a tiny compressed version and reconstructs the full vectors on-the-fly during attention. The result: 93% less KV cache memory with no quality loss.
 
@@ -42,30 +42,45 @@ Three steps:
 
 The compression is lossy in principle, but in practice the model learns to encode everything attention needs into those 512 dimensions.
 
-## The Speedup Trick: Absorb the Expansion
+## The Speedup Trick: Absorption
 
-Naive MLA would expand every cached token back to full keys before computing attention. That is expensive (you read 512 numbers and expand to 128 per head, for every token in the sequence).
+Here is the problem MLA creates for itself. You have a compressed blob (512 numbers) cached for each token. But attention needs keys. The blob is not a key. You need to decompress it first.
 
-The trick: instead of expanding every cached vector to compute attention, project the query into the same compressed space.
+**Naive approach (slow):**
+- You have 4096 cached blobs (one per previous token).
+- For each blob: multiply by a decompression matrix to get the full key.
+- Then dot the key with your query to get an attention score.
+- That is 4096 matrix multiplications. Expensive.
+
+**Absorption trick (fast):**
+- Instead of decompressing 4096 blobs, transform your 1 query to speak "blob language."
+- Multiply the query by the transpose of the decompression matrix. One operation.
+- Now the query is in the same 512-dim space as the blobs.
+- Dot the transformed query with all 4096 blobs directly. Cheap dot products.
+- That is 1 matrix multiplication + 4096 dot products.
 
 ```mermaid
 flowchart LR
-    subgraph NAIVE["Naive: expand S cached tokens (slow)"]
+    subgraph SLOW["Naive: change the cache to match the query"]
         direction LR
-        C1["Each cached latent<br>(512 dim)"] -->|"x S tokens"| EXP["W_UK: 512 → full key<br>(runs S times)"]
-        EXP --> DOT1["dot with query"]
+        BLOBS["4096 cached blobs"] -->|"4096 decompressions"| KEYS["4096 full keys"]
+        KEYS --> DOT1["dot with query"]
     end
-    subgraph FAST["Absorbed: project query once (fast)"]
+    subgraph FAST["Absorbed: change the query to match the cache"]
         direction LR
-        Q["Query per head<br>(128 dim)"] -->|"once"| PROJ["Project query into<br>latent space (128 → 512)"]
-        PROJ --> DOT2["dot directly with<br>cached latents (512)"]
+        Q["1 query"] -->|"1 transformation"| QT["transformed query"]
+        QT --> DOT2["dot with 4096 blobs<br>directly (no decompression)"]
     end
 
-    style NAIVE fill:#ffe4e6,stroke:#000,color:#000
+    style SLOW fill:#ffe4e6,stroke:#000,color:#000
     style FAST fill:#dcfce7,stroke:#000,color:#000
 ```
 
-In the naive approach, you run a matrix multiply for every cached token (S times). In the absorbed approach, you project the query into the 512-dim latent space (same space the cached vectors live in), then compute cheap dot products directly against the cached latents. Same math result, but the expensive operation runs once instead of S times.
+**Why this works:** Matrix multiplication is associative. `query dot (decompress(blob))` equals `(query x decompress_matrix_transposed) dot blob`. Same numbers out, different order of operations.
+
+**Result:** MLA never actually decompresses the cache. The cached blobs stay as-is. Only the query gets transformed. This is why MLA achieves both small cache AND fast attention.
+
+The same trick works for values: the value decompression matrix gets folded into the output projection. Zero decompression at any point during inference.
 
 ## Positional Encoding: A Separate Small Key
 
