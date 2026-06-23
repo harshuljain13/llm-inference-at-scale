@@ -1,603 +1,159 @@
 # 8.1 Benchmarking and Metrics
 
-> Benchmarking, monitoring, and troubleshooting LLM inference systems
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/09_operations/08.1_benchmarking/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/09_operations/08.1_benchmarking/lab.ipynb)
 
----
+Benchmarking LLM inference is fundamentally different from benchmarking traditional web services. A single request produces hundreds of tokens over seconds, latency compounds non-linearly with batch size, and the system exhibits two distinct computational phases (prefill and decode) with completely different bottlenecks. Getting benchmarking wrong means deploying systems that either waste GPU budget or violate user-facing SLOs under real traffic.
 
-## Learning Objectives
+## Why Standard Load Testing Fails
 
-By the end of this module, you will:
+Traditional HTTP benchmarks (wrk, hey, k6) measure request-level latency as a single number. LLM inference requires per-token streaming measurements because the user experience depends on time-to-first-token (responsiveness) and inter-token latency (reading speed), not just total completion time.
 
-- Define and measure key LLM inference metrics
-- Set up comprehensive monitoring dashboards
-- Benchmark inference performance accurately
-- Troubleshoot common production issues
-
----
-
-## Key Metrics
-
-### Metric Definitions
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    LLM INFERENCE METRICS                            │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   LATENCY METRICS:                                                  │
-│   ════════════════                                                  │
-│                                                                     │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                                                             │   │
-│   │   Request ──► Queue ──► Prefill ──► Decode ──► Response     │   │
-│   │      │         │          │           │           │         │   │
-│   │      └─────────┴──────────┴───────────┴───────────┘         │   │
-│   │            │                    │              │            │   │
-│   │         Queue              TTFT           Total             │   │
-│   │         Time          (Time to First    Latency            │   │
-│   │                         Token)                              │   │
-│   │                                                             │   │
-│   └─────────────────────────────────────────────────────────────┘   │
-│                                                                     │
-│   • Queue Time: Time waiting before processing starts               │
-│   • TTFT: Time from request to first token (includes prefill)       │
-│   • ITL: Inter-Token Latency (time between tokens)                  │
-│   • Total Latency: End-to-end request time                          │
-│                                                                     │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   THROUGHPUT METRICS:                                               │
-│   ═══════════════════                                               │
-│                                                                     │
-│   • Tokens/second: Total tokens generated per second                │
-│   • Requests/second: Completed requests per second                  │
-│   • Tokens/second/GPU: Normalized throughput per GPU                │
-│                                                                     │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   RESOURCE METRICS:                                                 │
-│   ═════════════════                                                 │
-│                                                                     │
-│   • GPU Utilization: % of GPU compute used                          │
-│   • GPU Memory: VRAM usage (model + KV cache)                       │
-│   • KV Cache Utilization: % of allocated KV cache used              │
-│   • Batch Size: Current number of sequences in batch                │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Traditional["Traditional Web Benchmark"]
+        style Traditional fill:#ffe4e6,stroke:#000
+        A[Send Request] --> B[Wait] --> C[Receive Response]
+        C --> D["Measure: total_ms"]
+    end
+    subgraph LLM["LLM Inference Benchmark"]
+        style LLM fill:#dbeafe,stroke:#000
+        E[Send Prompt] --> F[Prefill<br/>compute-bound]
+        F --> G[First Token<br/>TTFT]
+        G --> H[Decode tokens<br/>memory-bound]
+        H --> I["Measure: TTFT + ITL + throughput"]
+    end
 ```
 
-### Metric Targets by Use Case
+## The Four Metrics That Matter
 
-| Use Case            | TTFT Target | ITL Target | Throughput Priority |
-| ------------------- | ----------- | ---------- | ------------------- |
-| Real-time Chat      | < 500ms     | < 50ms     | Medium              |
-| Streaming Response  | < 1s        | < 30ms     | Medium              |
-| Batch Processing    | < 5s        | < 100ms    | High                |
-| Code Completion     | < 200ms     | < 20ms     | Low                 |
-| Document Processing | < 2s        | < 50ms     | High                |
+Every LLM deployment must track four metrics. Each maps to a different user experience dimension and a different system bottleneck.
 
----
-
-## Benchmarking
-
-### Benchmark Suite Implementation
-
-```python
-import asyncio
-import time
-import statistics
-from dataclasses import dataclass, field
-from typing import List, Optional
-import aiohttp
-import json
-
-
-@dataclass
-class BenchmarkResult:
-    """Results from a single benchmark request."""
-    prompt_tokens: int
-    completion_tokens: int
-    ttft_ms: float  # Time to first token
-    total_latency_ms: float
-    tokens_per_second: float
-    success: bool
-    error: Optional[str] = None
-
-
-@dataclass
-class BenchmarkSummary:
-    """Aggregated benchmark results."""
-    total_requests: int
-    successful_requests: int
-    failed_requests: int
-
-    # Latency stats (ms)
-    ttft_p50: float
-    ttft_p90: float
-    ttft_p99: float
-    ttft_mean: float
-
-    total_latency_p50: float
-    total_latency_p90: float
-    total_latency_p99: float
-    total_latency_mean: float
-
-    # Throughput
-    tokens_per_second: float
-    requests_per_second: float
-
-    # Duration
-    total_duration_seconds: float
-
-
-async def benchmark_request(
-    session: aiohttp.ClientSession,
-    url: str,
-    prompt: str,
-    max_tokens: int = 100,
-) -> BenchmarkResult:
-    """Execute a single benchmark request with streaming."""
-
-    payload = {
-        "model": "meta-llama/Llama-3.1-8B-Instruct",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "stream": True,
-    }
-
-    start_time = time.perf_counter()
-    ttft = None
-    completion_tokens = 0
-
-    try:
-        async with session.post(
-            f"{url}/v1/chat/completions",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-        ) as response:
-            async for line in response.content:
-                if ttft is None:
-                    ttft = (time.perf_counter() - start_time) * 1000
-
-                line = line.decode('utf-8').strip()
-                if line.startswith('data: ') and line != 'data: [DONE]':
-                    data = json.loads(line[6:])
-                    if data.get('choices', [{}])[0].get('delta', {}).get('content'):
-                        completion_tokens += 1
-
-        total_latency = (time.perf_counter() - start_time) * 1000
-
-        return BenchmarkResult(
-            prompt_tokens=len(prompt.split()),  # Approximate
-            completion_tokens=completion_tokens,
-            ttft_ms=ttft or total_latency,
-            total_latency_ms=total_latency,
-            tokens_per_second=completion_tokens / (total_latency / 1000) if total_latency > 0 else 0,
-            success=True,
-        )
-
-    except Exception as e:
-        return BenchmarkResult(
-            prompt_tokens=0,
-            completion_tokens=0,
-            ttft_ms=0,
-            total_latency_ms=0,
-            tokens_per_second=0,
-            success=False,
-            error=str(e),
-        )
-
-
-async def run_benchmark(
-    url: str,
-    prompts: List[str],
-    concurrency: int = 10,
-    max_tokens: int = 100,
-) -> BenchmarkSummary:
-    """Run benchmark with specified concurrency."""
-
-    start_time = time.perf_counter()
-    results: List[BenchmarkResult] = []
-
-    connector = aiohttp.TCPConnector(limit=concurrency)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        semaphore = asyncio.Semaphore(concurrency)
-
-        async def bounded_request(prompt):
-            async with semaphore:
-                return await benchmark_request(session, url, prompt, max_tokens)
-
-        tasks = [bounded_request(p) for p in prompts]
-        results = await asyncio.gather(*tasks)
-
-    total_duration = time.perf_counter() - start_time
-
-    # Calculate statistics
-    successful = [r for r in results if r.success]
-
-    if not successful:
-        raise ValueError("All requests failed!")
-
-    ttfts = [r.ttft_ms for r in successful]
-    latencies = [r.total_latency_ms for r in successful]
-    total_tokens = sum(r.completion_tokens for r in successful)
-
-    def percentile(data, p):
-        sorted_data = sorted(data)
-        idx = int(len(sorted_data) * p / 100)
-        return sorted_data[min(idx, len(sorted_data) - 1)]
-
-    return BenchmarkSummary(
-        total_requests=len(results),
-        successful_requests=len(successful),
-        failed_requests=len(results) - len(successful),
-
-        ttft_p50=percentile(ttfts, 50),
-        ttft_p90=percentile(ttfts, 90),
-        ttft_p99=percentile(ttfts, 99),
-        ttft_mean=statistics.mean(ttfts),
-
-        total_latency_p50=percentile(latencies, 50),
-        total_latency_p90=percentile(latencies, 90),
-        total_latency_p99=percentile(latencies, 99),
-        total_latency_mean=statistics.mean(latencies),
-
-        tokens_per_second=total_tokens / total_duration,
-        requests_per_second=len(successful) / total_duration,
-
-        total_duration_seconds=total_duration,
-    )
-
-
-# Example usage
-async def main():
-    prompts = [
-        "What is machine learning?",
-        "Explain quantum computing in simple terms.",
-        "Write a haiku about programming.",
-    ] * 100  # 300 total requests
-
-    summary = await run_benchmark(
-        url="http://localhost:8000",
-        prompts=prompts,
-        concurrency=32,
-        max_tokens=100,
-    )
-
-    print(f"Benchmark Results:")
-    print(f"  Requests: {summary.successful_requests}/{summary.total_requests}")
-    print(f"  TTFT P50/P90/P99: {summary.ttft_p50:.0f}/{summary.ttft_p90:.0f}/{summary.ttft_p99:.0f} ms")
-    print(f"  Latency P50/P90/P99: {summary.total_latency_p50:.0f}/{summary.total_latency_p90:.0f}/{summary.total_latency_p99:.0f} ms")
-    print(f"  Throughput: {summary.tokens_per_second:.0f} tokens/s, {summary.requests_per_second:.1f} req/s")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+```mermaid
+flowchart LR
+    subgraph Timeline["Request Timeline"]
+        style Timeline fill:#f3f4f6,stroke:#000
+        R[Request arrives] --> Q[Queue wait]
+        Q --> P[Prefill phase]
+        P --> T1[Token 1]
+        T1 --> T2[Token 2]
+        T2 --> TN[Token N]
+    end
+    subgraph Metrics["Metric Mapping"]
+        style Metrics fill:#dcfce7,stroke:#000
+        M1["TTFT = queue + prefill<br/>User: how fast does it start?"]
+        M2["ITL = time between tokens<br/>User: can I read smoothly?"]
+        M3["Throughput = tokens/sec/GPU<br/>Operator: cost efficiency"]
+        M4["Goodput = SLO-compliant req/s<br/>Operator: real capacity"]
+    end
 ```
 
----
+**TTFT (Time to First Token):** Dominated by prefill compute. Scales linearly with input length. Target: 200ms for code completion, 500ms for chat, 5s for batch.
 
-## Monitoring Dashboard
+**ITL (Inter-Token Latency):** Dominated by memory bandwidth during decode. Degrades as batch size grows because more KV cache entries compete for bandwidth. Target: 20-50ms for streaming, 100ms for batch.
 
-### CloudWatch Dashboard Specification
+**Throughput (tokens/s/GPU):** Total output tokens generated per second per GPU. The metric operators optimize for cost. Higher batch sizes increase throughput but hurt per-request latency.
 
-```yaml
-# cloudwatch-dashboard.yaml
-AWSTemplateFormatVersion: "2010-09-09"
-Description: LLM Inference Monitoring Dashboard
+**Goodput (SLO-compliant requests/s):** The fraction of throughput that actually meets latency SLOs. A system doing 1000 tok/s but violating TTFT on 40% of requests has low goodput despite high throughput.
 
-Resources:
-  LLMDashboard:
-    Type: AWS::CloudWatch::Dashboard
-    Properties:
-      DashboardName: LLM-Inference-Dashboard
-      DashboardBody: !Sub |
-        {
-          "widgets": [
-            {
-              "type": "metric",
-              "x": 0, "y": 0, "width": 12, "height": 6,
-              "properties": {
-                "title": "Request Latency",
-                "metrics": [
-                  ["LLMInference", "TTFT_P50", {"label": "TTFT P50"}],
-                  [".", "TTFT_P99", {"label": "TTFT P99"}],
-                  [".", "TotalLatency_P50", {"label": "Total P50"}],
-                  [".", "TotalLatency_P99", {"label": "Total P99"}]
-                ],
-                "period": 60,
-                "stat": "Average"
-              }
-            },
-            {
-              "type": "metric",
-              "x": 12, "y": 0, "width": 12, "height": 6,
-              "properties": {
-                "title": "Throughput",
-                "metrics": [
-                  ["LLMInference", "TokensPerSecond", {"label": "Tokens/s"}],
-                  [".", "RequestsPerSecond", {"label": "Requests/s", "yAxis": "right"}]
-                ],
-                "period": 60
-              }
-            },
-            {
-              "type": "metric",
-              "x": 0, "y": 6, "width": 8, "height": 6,
-              "properties": {
-                "title": "GPU Utilization",
-                "metrics": [
-                  ["LLMInference", "GPUUtilization", {"label": "GPU %"}],
-                  [".", "GPUMemoryUsed", {"label": "Memory GB", "yAxis": "right"}]
-                ],
-                "period": 60
-              }
-            },
-            {
-              "type": "metric",
-              "x": 8, "y": 6, "width": 8, "height": 6,
-              "properties": {
-                "title": "Queue & Batch",
-                "metrics": [
-                  ["LLMInference", "QueueDepth", {"label": "Queue Depth"}],
-                  [".", "BatchSize", {"label": "Batch Size"}],
-                  [".", "KVCacheUtilization", {"label": "KV Cache %", "yAxis": "right"}]
-                ],
-                "period": 60
-              }
-            },
-            {
-              "type": "metric",
-              "x": 16, "y": 6, "width": 8, "height": 6,
-              "properties": {
-                "title": "Errors",
-                "metrics": [
-                  ["LLMInference", "ErrorRate", {"label": "Error Rate %"}],
-                  [".", "TimeoutRate", {"label": "Timeout Rate %"}]
-                ],
-                "period": 60
-              }
-            }
-          ]
-        }
+## SLO Profiles by Use Case
+
+| Use Case | TTFT P99 | ITL P99 | Throughput Priority | Bottleneck |
+|----------|----------|---------|--------------------:|------------|
+| Voice/realtime | < 150ms | < 30ms | Low | Prefill |
+| Code completion | < 200ms | < 20ms | Low | Prefill |
+| Chat streaming | < 500ms | < 50ms | Medium | Both |
+| Document processing | < 2s | < 80ms | High | Decode |
+| Batch/offline | < 5s | < 200ms | Highest | Throughput |
+
+## Benchmark Design: Getting It Right
+
+Most published benchmarks are misleading because they use fixed-length synthetic prompts, ignore queue effects, and report averages instead of percentiles. A production-grade benchmark must model real traffic patterns.
+
+```mermaid
+flowchart LR
+    subgraph Design["Benchmark Design Checklist"]
+        style Design fill:#fef3c7,stroke:#000
+        D1["1. Realistic prompts<br/>Variable length, real distribution"]
+        D2["2. Poisson arrivals<br/>Not fixed-interval bursts"]
+        D3["3. Ramp-up sweep<br/>Find saturation point"]
+        D4["4. Streaming client<br/>Measure per-token, not total"]
+        D5["5. Report percentiles<br/>P50/P90/P99, not mean"]
+    end
+    D1 --> D2 --> D3 --> D4 --> D5
 ```
 
-### Prometheus Metrics Export
+**Realistic workload generation:** Production traffic follows log-normal input length distributions. A chat workload has inputs of 20-200 tokens; a RAG workload has 500-4000 tokens. Mixing short and long prompts reveals scheduling interference that uniform benchmarks hide.
 
-```python
-from prometheus_client import Counter, Histogram, Gauge, start_http_server
-import time
+**Poisson arrival process:** Real traffic arrives randomly, not in synchronized bursts. Poisson arrivals create natural queue buildup that exposes scheduling latency. Fixed-rate injection underestimates tail latency by 2-5x.
 
-# Define metrics
-REQUEST_LATENCY = Histogram(
-    'llm_request_latency_seconds',
-    'Request latency in seconds',
-    ['model', 'status'],
-    buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
-)
+**Saturation sweep:** Run the benchmark at increasing request rates (1, 5, 10, 20, 50, 100 req/s) and plot latency vs. throughput. The "knee" where P99 TTFT exceeds your SLO is your true capacity, not peak throughput.
 
-TTFT_LATENCY = Histogram(
-    'llm_ttft_seconds',
-    'Time to first token in seconds',
-    ['model'],
-    buckets=[0.05, 0.1, 0.25, 0.5, 1.0, 2.0]
-)
+## Bottleneck Diagnosis
 
-TOKENS_GENERATED = Counter(
-    'llm_tokens_generated_total',
-    'Total tokens generated',
-    ['model']
-)
+After collecting benchmark data, classify the bottleneck to choose the right optimization.
 
-REQUESTS_TOTAL = Counter(
-    'llm_requests_total',
-    'Total requests',
-    ['model', 'status']
-)
-
-GPU_UTILIZATION = Gauge(
-    'llm_gpu_utilization_percent',
-    'GPU utilization percentage',
-    ['gpu_id']
-)
-
-KV_CACHE_UTILIZATION = Gauge(
-    'llm_kv_cache_utilization_percent',
-    'KV cache utilization percentage'
-)
-
-BATCH_SIZE = Gauge(
-    'llm_current_batch_size',
-    'Current batch size'
-)
-
-
-class MetricsMiddleware:
-    """Middleware to collect inference metrics."""
-
-    def __init__(self, model_name: str):
-        self.model_name = model_name
-
-    def record_request(
-        self,
-        ttft_seconds: float,
-        total_latency_seconds: float,
-        tokens_generated: int,
-        success: bool
-    ):
-        status = "success" if success else "error"
-
-        REQUEST_LATENCY.labels(
-            model=self.model_name,
-            status=status
-        ).observe(total_latency_seconds)
-
-        TTFT_LATENCY.labels(model=self.model_name).observe(ttft_seconds)
-
-        TOKENS_GENERATED.labels(model=self.model_name).inc(tokens_generated)
-
-        REQUESTS_TOTAL.labels(
-            model=self.model_name,
-            status=status
-        ).inc()
-
-    def update_gpu_metrics(self, gpu_id: int, utilization: float):
-        GPU_UTILIZATION.labels(gpu_id=str(gpu_id)).set(utilization)
-
-    def update_batch_metrics(self, batch_size: int, kv_cache_util: float):
-        BATCH_SIZE.set(batch_size)
-        KV_CACHE_UTILIZATION.set(kv_cache_util)
-
-
-# Start metrics server
-start_http_server(9090)
+```mermaid
+flowchart LR
+    subgraph Diagnosis["Bottleneck Classification"]
+        style Diagnosis fill:#f3e8ff,stroke:#000
+        Start[High latency<br/>detected] --> Check1{TTFT >> ITL?}
+        Check1 -->|Yes| PB["Prefill-bound<br/>Fix: chunked prefill,<br/>prefix caching, TP"]
+        Check1 -->|No| Check2{ITL growing<br/>with batch?}
+        Check2 -->|Yes| DB["Decode-bound<br/>Fix: quantization,<br/>speculative decode"]
+        Check2 -->|No| SB["Schedule-bound<br/>Fix: reduce max_seqs,<br/>add replicas"]
+    end
 ```
 
----
+**Prefill-bound:** TTFT variance is high, TTFT/E2E ratio > 0.4, long prompts cause spikes. Fix with chunked prefill (splits long prompts across iterations), prefix caching (reuses KV for shared prefixes), or tensor parallelism (spreads compute across GPUs).
 
-## Troubleshooting Guide
+**Decode-bound:** ITL grows linearly with concurrent sequences. Memory bandwidth is saturated. Fix with quantization (fewer bytes per KV read), speculative decoding (generates multiple tokens per forward pass), or GQA models (fewer KV heads = less bandwidth).
 
-### Common Issues and Solutions
+**Schedule-bound:** Queue time dominates. GPU utilization is low but latency is high. Fix by reducing max concurrent sequences, adding replicas, or switching to a faster scheduler (e.g., vLLM continuous batching over static batching).
+
+## Capacity Planning Formula
+
+Given benchmark results at a known concurrency level, estimate GPUs needed for a target request rate:
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    TROUBLESHOOTING GUIDE                            │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   SYMPTOM: High TTFT (Time to First Token)                          │
-│   ═══════════════════════════════════════                           │
-│   Possible Causes:                                                  │
-│   • Long prompts causing slow prefill                               │
-│   • GPU memory pressure                                             │
-│   • High queue depth                                                │
-│                                                                     │
-│   Solutions:                                                        │
-│   1. Enable chunked prefill: --enable-chunked-prefill               │
-│   2. Reduce max_num_seqs to lower queue depth                       │
-│   3. Check GPU memory utilization                                   │
-│   4. Consider prompt caching for repeated prefixes                  │
-│                                                                     │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   SYMPTOM: High ITL (Inter-Token Latency)                           │
-│   ═══════════════════════════════════════                           │
-│   Possible Causes:                                                  │
-│   • Too many concurrent sequences                                   │
-│   • Memory bandwidth saturation                                     │
-│   • Large batch causing slow iterations                             │
-│                                                                     │
-│   Solutions:                                                        │
-│   1. Reduce max_num_seqs                                            │
-│   2. Use quantization (INT8/INT4) to reduce memory reads            │
-│   3. Add tensor parallelism for more bandwidth                      │
-│   4. Set max_num_batched_tokens to limit batch size                 │
-│                                                                     │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   SYMPTOM: OOM (Out of Memory) Errors                               │
-│   ═════════════════════════════════════                             │
-│   Possible Causes:                                                  │
-│   • KV cache too large                                              │
-│   • Too many concurrent sequences                                   │
-│   • Model + KV cache exceeds VRAM                                   │
-│                                                                     │
-│   Solutions:                                                        │
-│   1. Reduce gpu_memory_utilization (e.g., 0.85)                     │
-│   2. Reduce max_num_seqs                                            │
-│   3. Reduce max_model_len                                           │
-│   4. Use quantization                                               │
-│   5. Add more GPUs with tensor parallelism                          │
-│                                                                     │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   SYMPTOM: Low GPU Utilization                                      │
-│   ════════════════════════════                                      │
-│   Possible Causes:                                                  │
-│   • Not enough concurrent requests                                  │
-│   • Memory-bound decode phase                                       │
-│   • Inefficient batching                                            │
-│                                                                     │
-│   Solutions:                                                        │
-│   1. Increase load (more concurrent requests)                       │
-│   2. Increase max_num_seqs to allow larger batches                  │
-│   3. This is NORMAL for decode phase (memory-bound)                 │
-│                                                                     │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   SYMPTOM: Requests Timing Out                                      │
-│   ════════════════════════════                                      │
-│   Possible Causes:                                                  │
-│   • Queue too deep                                                  │
-│   • Generation too slow                                             │
-│   • Deadlock or hang                                                │
-│                                                                     │
-│   Solutions:                                                        │
-│   1. Check queue depth metrics                                      │
-│   2. Reduce max_num_seqs                                            │
-│   3. Add more replicas                                              │
-│   4. Check for CUDA errors in logs                                  │
-│   5. Restart if hung (last resort)                                  │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+measured_rps_per_gpu = successful_requests / (benchmark_duration * gpu_count)
+gpus_needed = ceil(target_rps / measured_rps_per_gpu * (1 + headroom))
 ```
 
-### Diagnostic Commands
+Always include 30%+ headroom for traffic spikes. Validate by running the benchmark again at `gpus_needed` scale to confirm SLOs still hold under the projected load.
 
-```bash
-# Check GPU status
-nvidia-smi
+## Tools
 
-# Watch GPU utilization
-watch -n 0.5 nvidia-smi
+| Tool | Strengths | Use When |
+|------|-----------|----------|
+| [LLMPerf](https://github.com/ray-project/llmperf) | Streaming TTFT/ITL, multi-provider | Quick per-endpoint comparison |
+| [GenAI-Perf](https://github.com/triton-inference-server/perf_analyzer) | NVIDIA-optimized, Triton integration | TensorRT-LLM benchmarks |
+| [vLLM benchmark_serving.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/benchmark_serving.py) | ShareGPT dataset, realistic | vLLM capacity planning |
+| Custom async client | Full control, Poisson arrivals | Production-specific workloads |
 
-# Check vLLM metrics
-curl http://localhost:8000/metrics
+## FAQ
 
-# Check vLLM health
-curl http://localhost:8000/health
+**Q: Why not just use wrk or hey for LLM benchmarks?**
+They measure total request latency as one number. LLM inference needs per-token streaming measurements because TTFT and ITL have different bottlenecks and different SLO targets.
 
-# View vLLM logs
-docker logs -f vllm-container
+**Q: What is the difference between throughput and goodput?**
+Throughput counts all tokens generated. Goodput counts only tokens from requests that met their SLO. A system can have high throughput but low goodput if latency violations are frequent.
 
-# Check CUDA errors
-dmesg | grep -i nvidia
+**Q: How many requests do I need for statistically meaningful P99?**
+At minimum 1000 requests. For P99.9, you need 10,000+. With fewer samples, tail latency estimates have high variance.
 
-# Memory usage breakdown
-nvidia-smi --query-gpu=memory.used,memory.free,memory.total --format=csv
-```
+**Q: Should I benchmark with or without prompt caching enabled?**
+Both. Cache-warm benchmarks show best-case for repeated prefixes. Cache-cold benchmarks show worst-case for unique prompts. Production is typically a mix.
 
----
+**Q: Why does ITL degrade with batch size?**
+Decode is memory-bandwidth-bound. Each token generation reads KV cache for all sequences in the batch. More sequences = more bytes read per iteration = higher per-token latency.
 
-## Key Takeaways
-
-1. **Measure what matters** - TTFT, ITL, throughput, not just average latency
-
-2. **P99 is critical** - Tail latency affects user experience
-
-3. **Monitor GPU metrics** - Utilization, memory, KV cache
-
-4. **Benchmark realistically** - Use production-like prompts and concurrency
-
-5. **Troubleshoot systematically** - Check metrics, identify bottleneck, apply fix
-
-6. **Automate alerting** - Set thresholds for latency, errors, resource usage
-
----
-
-## Lab Preview: Benchmarking and Monitoring
-
-In Lab 10, you will:
-
-- Run comprehensive benchmarks
-- Set up Prometheus + Grafana monitoring
-- Create CloudWatch dashboards
-- Practice troubleshooting scenarios
-
----
+**Q: How do I benchmark multi-GPU tensor parallelism?**
+Use the same benchmark client. TP is transparent to the client. Compare throughput/latency of TP=1 vs TP=2 vs TP=4 at the same request rate to find the optimal parallelism degree.
 
 ## References
 
-1. vLLM Metrics Documentation
-2. Prometheus Best Practices
-3. AWS CloudWatch Documentation
-4. NVIDIA DCGM for GPU Monitoring
+1. Agrawal, A. et al. "Sarathi-Serve: Optimizing LLM Serving with Chunked Prefills." arXiv:2403.02310, 2024.
+2. Kwon, W. et al. "Efficient Memory Management for Large Language Model Serving with PagedAttention." SOSP 2023.
+3. Zhong, Y. et al. "DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving." OSDI 2024.
+4. [LLMPerf benchmark suite](https://github.com/ray-project/llmperf)
+5. [vLLM benchmark scripts](https://github.com/vllm-project/vllm/tree/main/benchmarks)

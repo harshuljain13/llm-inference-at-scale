@@ -1,5 +1,7 @@
 # 1.1 GPU Memory Hierarchy
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/01_gpu_hardware/01.1_gpu_memory_hierarchy/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/01_gpu_hardware/01.1_gpu_memory_hierarchy/lab.ipynb)
+
 Modern GPUs contain a hierarchy of memory subsystems, each with different capacity, bandwidth, and latency characteristics. Understanding this hierarchy is essential for LLM inference because the placement of model weights, activations, and KV cache entries across these levels determines throughput. This module derives VRAM requirements from first principles and provides worked examples for production model sizing.
 
 ---

@@ -1,678 +1,158 @@
-# 7.5 Cold Start Optimization
+# 7.5 Cold Start in Serverless LLM Serving
 
-> Deploying LLMs in production with Ray Serve, KServe, and llm-d
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/08_serving/07.5_cold_start/cold_start/lab.ipynb) [![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.marimo.io/github/harshuljain13/llm-inference-at-scale/blob/master/content/08_serving/07.5_cold_start/cold_start/lab.ipynb)
 
----
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/content/08_serving/07.5_cold_start/lab.ipynb)
+[![Open In Molab](https://img.shields.io/badge/Open%20in-Molab-blue)](https://molab.cloud/github/harshuljain13/llm-inference-at-scale/blob/master/content/08_serving/07.5_cold_start/lab.ipynb)
 
-## Learning Objectives
-
-By the end of this module, you will:
-
-- Design production-ready LLM serving architectures
-- Deploy with Ray Serve and KServe
-- Understand disaggregated serving with llm-d
-- Implement security best practices
+Serverless LLM serving promises scale-to-zero economics: you pay nothing when idle and spin up on demand. The fundamental challenge is cold start latency. Loading a 7B model takes 15-45 seconds; a 70B model takes 2-5 minutes. This module breaks down where cold start time goes, and what techniques reduce it from minutes to seconds.
 
 ---
 
-## Production Serving Stack
+## Anatomy of a Cold Start
 
+When a serverless LLM endpoint receives its first request after scaling to zero, five sequential steps must complete before the first token is generated.
+
+```mermaid
+flowchart LR
+    subgraph Steps["Cold Start Timeline"]
+        style Steps fill:#ffe4e6,stroke:#000,color:#000
+        A[Container<br/>Pull<br/>5-30s] --> B[Runtime<br/>Init<br/>2-5s]
+        B --> C[Weight<br/>Download<br/>10-120s]
+        C --> D[GPU<br/>Load<br/>5-30s]
+        D --> E[Warmup<br/>Inference<br/>1-3s]
+    end
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                 PRODUCTION LLM SERVING STACK                        │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                      Load Balancer                          │   │
-│   │              (ALB / NLB / Istio Gateway)                    │   │
-│   └─────────────────────────────┬───────────────────────────────┘   │
-│                                 │                                   │
-│   ┌─────────────────────────────▼───────────────────────────────┐   │
-│   │                      API Gateway                            │   │
-│   │         (Rate limiting, Auth, Request routing)              │   │
-│   └─────────────────────────────┬───────────────────────────────┘   │
-│                                 │                                   │
-│   ┌─────────────────────────────▼───────────────────────────────┐   │
-│   │                   Inference Router                          │   │
-│   │        (Model selection, A/B testing, Canary)               │   │
-│   └─────────────────────────────┬───────────────────────────────┘   │
-│                                 │                                   │
-│         ┌───────────────────────┼───────────────────────┐           │
-│         ▼                       ▼                       ▼           │
-│   ┌───────────┐           ┌───────────┐           ┌───────────┐     │
-│   │  Model A  │           │  Model B  │           │  Model C  │     │
-│   │  Replica  │           │  Replica  │           │  Replica  │     │
-│   │    1-N    │           │    1-N    │           │    1-N    │     │
-│   └───────────┘           └───────────┘           └───────────┘     │
-│                                                                     │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                    Observability                            │   │
-│   │     (Prometheus, Grafana, CloudWatch, Datadog)              │   │
-│   └─────────────────────────────────────────────────────────────┘   │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+
+For a Llama 3.1 8B model on A10G:
+- Container pull: ~8s (with cached base layers)
+- Runtime init: ~3s (Python, CUDA, vLLM)
+- Weight download: ~12s (16GB from S3 at 10 Gbps)
+- GPU transfer: ~8s (CPU RAM to GPU)
+- Warmup: ~2s (CUDA graph compilation)
+- **Total: ~33 seconds before first token**
 
 ---
 
-## Ray Serve Deployment
+## Why LLMs Make Cold Start Worse
 
-### Architecture Overview
+Traditional ML models (XGBoost, small NNs) cold-start in 1-3 seconds because they fit in CPU memory and require no GPU initialization. LLMs break every assumption that makes traditional cold start tolerable.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    RAY SERVE ARCHITECTURE                           │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                     Ray Cluster                             │   │
-│   │                                                             │   │
-│   │   ┌─────────────┐                                           │   │
-│   │   │  Head Node  │                                           │   │
-│   │   │  • GCS      │                                           │   │
-│   │   │  • Dashboard│                                           │   │
-│   │   └─────────────┘                                           │   │
-│   │                                                             │   │
-│   │   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │   │
-│   │   │ Worker Node │  │ Worker Node │  │ Worker Node │         │   │
-│   │   │   (GPU)     │  │   (GPU)     │  │   (GPU)     │         │   │
-│   │   │             │  │             │  │             │         │   │
-│   │   │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │         │   │
-│   │   │ │ Replica │ │  │ │ Replica │ │  │ │ Replica │ │         │   │
-│   │   │ │  (vLLM) │ │  │ │  (vLLM) │ │  │ │  (vLLM) │ │         │   │
-│   │   │ └─────────┘ │  │ └─────────┘ │  │ └─────────┘ │         │   │
-│   │   └─────────────┘  └─────────────┘  └─────────────┘         │   │
-│   │                                                             │   │
-│   │   ┌─────────────────────────────────────────────────────┐   │   │
-│   │   │              Ray Serve Controller                   │   │   │
-│   │   │  • Autoscaling                                      │   │   │
-│   │   │  • Health checks                                    │   │   │
-│   │   │  • Traffic routing                                  │   │   │
-│   │   └─────────────────────────────────────────────────────┘   │   │
-│   │                                                             │   │
-│   └─────────────────────────────────────────────────────────────┘   │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Traditional["Traditional Model"]
+        style Traditional fill:#dcfce7,stroke:#000,color:#000
+        T1[100 MB weights] --> T2[CPU inference]
+        T2 --> T3[< 1s total]
+    end
+    subgraph LLM["LLM"]
+        style LLM fill:#fef3c7,stroke:#000,color:#000
+        L1[16 GB weights] --> L2[GPU required]
+        L2 --> L3[CUDA init]
+        L3 --> L4[KV cache alloc]
+        L4 --> L5[30-120s total]
+    end
 ```
 
-### Ray Serve vLLM Deployment
-
-```python
-from ray import serve
-from vllm import LLM, SamplingParams
-from starlette.requests import Request
-import json
-
-@serve.deployment(
-    ray_actor_options={"num_gpus": 1},
-    autoscaling_config={
-        "min_replicas": 1,
-        "max_replicas": 4,
-        "target_num_ongoing_requests_per_replica": 10,
-    },
-)
-class VLLMDeployment:
-    def __init__(self):
-        self.llm = LLM(
-            model="meta-llama/Llama-3.1-8B-Instruct",
-            gpu_memory_utilization=0.9,
-            max_num_seqs=64,
-            enable_chunked_prefill=True,
-        )
-        self.default_sampling = SamplingParams(
-            temperature=0.7,
-            top_p=0.9,
-            max_tokens=256,
-        )
-
-    async def __call__(self, request: Request) -> dict:
-        body = await request.json()
-        prompt = body.get("prompt", "")
-
-        # Override sampling params if provided
-        sampling = SamplingParams(
-            temperature=body.get("temperature", 0.7),
-            top_p=body.get("top_p", 0.9),
-            max_tokens=body.get("max_tokens", 256),
-        )
-
-        outputs = self.llm.generate([prompt], sampling)
-
-        return {
-            "text": outputs[0].outputs[0].text,
-            "usage": {
-                "prompt_tokens": len(outputs[0].prompt_token_ids),
-                "completion_tokens": len(outputs[0].outputs[0].token_ids),
-            }
-        }
-
-
-# Deploy
-deployment = VLLMDeployment.bind()
-serve.run(deployment, host="0.0.0.0", port=8000)
-```
-
-### Multi-Model Deployment
-
-```python
-from ray import serve
-
-@serve.deployment(ray_actor_options={"num_gpus": 1})
-class SmallModel:
-    def __init__(self):
-        self.llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct")
-
-    async def __call__(self, request):
-        # Handle request
-        pass
-
-@serve.deployment(ray_actor_options={"num_gpus": 4})
-class LargeModel:
-    def __init__(self):
-        self.llm = LLM(
-            model="meta-llama/Llama-3.1-70B-Instruct",
-            tensor_parallel_size=4
-        )
-
-    async def __call__(self, request):
-        # Handle request
-        pass
-
-@serve.deployment
-class Router:
-    def __init__(self, small_model, large_model):
-        self.small = small_model
-        self.large = large_model
-
-    async def __call__(self, request):
-        body = await request.json()
-        model = body.get("model", "small")
-
-        if model == "large":
-            return await self.large.remote(request)
-        return await self.small.remote(request)
-
-
-# Compose deployments
-small = SmallModel.bind()
-large = LargeModel.bind()
-router = Router.bind(small, large)
-
-serve.run(router, host="0.0.0.0", port=8000)
-```
+The weight size is 100-1000x larger, GPU memory allocation is non-trivial, and CUDA kernel compilation adds fixed overhead regardless of model size.
 
 ---
 
-## KServe Deployment
+## Mitigation Strategies
 
-### InferenceService Definition
+### Pre-warming
 
-```yaml
-# kserve-llm.yaml
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata:
-  name: llama-3-8b
-  namespace: llm-serving
-spec:
-  predictor:
-    minReplicas: 1
-    maxReplicas: 4
-    scaleTarget: 10 # Target concurrent requests
-    scaleMetric: concurrency
+Keep minimum replicas warm (never scale to zero). Trades cost for latency. Most production systems keep at least one replica warm during business hours.
 
-    containers:
-      - name: kserve-container
-        image: vllm/vllm-openai:latest
-        args:
-          - --model
-          - meta-llama/Llama-3.1-8B-Instruct
-          - --gpu-memory-utilization
-          - "0.9"
-          - --max-num-seqs
-          - "64"
-          - --enable-chunked-prefill
+### Weight Caching
 
-        resources:
-          limits:
-            nvidia.com/gpu: 1
-            memory: 32Gi
-          requests:
-            nvidia.com/gpu: 1
-            memory: 24Gi
+Store model weights on fast local NVMe rather than pulling from object storage. Reduces the download step from 60s to 3-5s for cached models.
 
-        env:
-          - name: HF_TOKEN
-            valueFrom:
-              secretKeyRef:
-                name: huggingface-secret
-                key: token
+### Snapshot-Based Loading
 
-        ports:
-          - containerPort: 8000
-            protocol: TCP
+Serialize the fully initialized model state (including CUDA graphs) to disk. On cold start, restore the snapshot rather than re-initializing from scratch.
 
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 60
-          periodSeconds: 10
-
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 120
-          periodSeconds: 30
+```mermaid
+flowchart LR
+    subgraph Normal["Normal Load Path"]
+        style Normal fill:#ffe4e6,stroke:#000,color:#000
+        N1[Download] --> N2[Parse] --> N3[GPU Load] --> N4[Compile]
+    end
+    subgraph Snap["Snapshot Path"]
+        style Snap fill:#dcfce7,stroke:#000,color:#000
+        S1[Load Snapshot<br/>from NVMe] --> S2[Restore GPU State]
+    end
 ```
 
-### Autoscaling Configuration
+Snapshot loading can reduce cold start from 33s to 8-12s by eliminating parsing, graph compilation, and weight transformation steps.
 
-```yaml
-# kserve-autoscaling.yaml
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata:
-  name: llama-3-8b-autoscale
-  annotations:
-    # Knative autoscaling annotations
-    autoscaling.knative.dev/class: kpa.autoscaling.knative.dev
-    autoscaling.knative.dev/metric: concurrency
-    autoscaling.knative.dev/target: "10"
-    autoscaling.knative.dev/minScale: "1"
-    autoscaling.knative.dev/maxScale: "10"
-    # Scale down delay
-    autoscaling.knative.dev/scaleDownDelay: "5m"
-spec:
-  predictor:
-    containers:
-      - name: kserve-container
-        image: vllm/vllm-openai:latest
-        # ... rest of config
-```
+### Speculative Pre-loading
 
-### Canary Deployment
-
-```yaml
-# kserve-canary.yaml
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata:
-  name: llama-canary
-spec:
-  predictor:
-    # Production model (90% traffic)
-    canaryTrafficPercent: 10
-    containers:
-      - name: kserve-container
-        image: vllm/vllm-openai:latest
-        args:
-          - --model
-          - meta-llama/Llama-3.1-8B-Instruct
-
-  # Canary model (10% traffic)
-  canary:
-    predictor:
-      containers:
-        - name: kserve-container
-          image: vllm/vllm-openai:latest
-          args:
-            - --model
-            - meta-llama/Llama-3.1-8B-Instruct
-            - --quantization
-            - awq # Testing quantized version
-```
+Predict scale-up events before they happen using traffic patterns (e.g., morning ramp-up). Start loading models 2-3 minutes before predicted demand arrives.
 
 ---
 
-## Disaggregated Serving with llm-d
+## Platform Comparison
 
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    LLM-D ARCHITECTURE                               │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   Traditional (Aggregated):                                         │
-│   ═════════════════════════                                         │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │  GPU Worker                                                 │   │
-│   │  ┌─────────────────────────────────────────────────────┐    │   │
-│   │  │  Prefill + Decode (same GPU)                        │    │   │
-│   │  │  • Prefill: compute-bound, bursty                   │    │   │
-│   │  │  • Decode: memory-bound, steady                     │    │   │
-│   │  │  • Resource contention!                             │    │   │
-│   │  └─────────────────────────────────────────────────────┘    │   │
-│   └─────────────────────────────────────────────────────────────┘   │
-│                                                                     │
-│   ─────────────────────────────────────────────────────────────    │
-│                                                                     │
-│   Disaggregated (llm-d):                                            │
-│   ══════════════════════                                            │
-│                                                                     │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                      Router                                 │   │
-│   └─────────────────────────────┬───────────────────────────────┘   │
-│                                 │                                   │
-│         ┌───────────────────────┴───────────────────────┐           │
-│         ▼                                               ▼           │
-│   ┌─────────────────────┐                   ┌─────────────────────┐ │
-│   │   Prefill Workers   │                   │   Decode Workers    │ │
-│   │   (Compute-optimized)│                  │   (Memory-optimized)│ │
-│   │                     │                   │                     │ │
-│   │   • High compute    │   KV Cache        │   • High bandwidth  │ │
-│   │   • Bursty workload │ ───Transfer───►   │   • Steady workload │ │
-│   │   • Scale for TTFT  │                   │   • Scale for ITL   │ │
-│   │                     │                   │                     │ │
-│   └─────────────────────┘                   └─────────────────────┘ │
-│                                                                     │
-│   Benefits:                                                         │
-│   • Independent scaling of prefill and decode                       │
-│   • Better resource utilization                                     │
-│   • Optimized hardware for each phase                               │
-│   • Lower tail latency                                              │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### When to Use Disaggregated Serving
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│           DISAGGREGATED SERVING DECISION GUIDE                      │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   USE disaggregated serving when:                                   │
-│   ✓ High request volume with variable prompt lengths                │
-│   ✓ Strict latency SLAs (both TTFT and ITL)                         │
-│   ✓ Cost optimization is critical                                   │
-│   ✓ Have infrastructure for KV cache transfer                       │
-│                                                                     │
-│   DON'T USE disaggregated serving when:                             │
-│   ✗ Low request volume                                              │
-│   ✗ Simple deployment requirements                                  │
-│   ✗ Limited infrastructure complexity budget                        │
-│   ✗ Uniform prompt lengths                                          │
-│                                                                     │
-│   Typical Improvements:                                             │
-│   • 20-40% better GPU utilization                                   │
-│   • 30-50% lower P99 latency                                        │
-│   • 15-25% cost reduction at scale                                  │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+| Platform | Cold Start (7B) | Strategy |
+|----------|----------------|----------|
+| SageMaker | 45-90s | Container + S3 download |
+| Baseten | 10-15s | NVMe cache + snapshots |
+| Modal | 8-12s | Container snapshots |
+| Replicate | 5-10s | Hot pools + COW memory |
+| RunPod Serverless | 15-30s | Volume mounts |
+| Self-hosted (Ray) | 0s | Always-on replicas |
 
 ---
 
-## Deployment Patterns
+## Measuring Cold Start
 
-### Single Model Deployment
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                 SINGLE MODEL DEPLOYMENT                             │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                    Load Balancer                            │   │
-│   └─────────────────────────────┬───────────────────────────────┘   │
-│                                 │                                   │
-│         ┌───────────────────────┼───────────────────────┐           │
-│         ▼                       ▼                       ▼           │
-│   ┌───────────┐           ┌───────────┐           ┌───────────┐     │
-│   │ Replica 1 │           │ Replica 2 │           │ Replica N │     │
-│   │  (GPU)    │           │  (GPU)    │           │  (GPU)    │     │
-│   └───────────┘           └───────────┘           └───────────┘     │
-│                                                                     │
-│   Use case: Single model, horizontal scaling                        │
-│   Scaling: Add replicas based on load                               │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Metrics["Key Metrics"]
+        style Metrics fill:#dbeafe,stroke:#000,color:#000
+        M1[P50 Cold Start]
+        M2[P99 Cold Start]
+        M3[Cold Start Rate]
+        M4[Scale-to-Zero<br/>Savings]
+    end
+    subgraph Tradeoff["Optimization Target"]
+        style Tradeoff fill:#f3e8ff,stroke:#000,color:#000
+        T[Cost Saved vs<br/>Latency Added]
+    end
+    M1 --> T
+    M2 --> T
+    M3 --> T
+    M4 --> T
 ```
 
-### Multi-Model Deployment
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                 MULTI-MODEL DEPLOYMENT                              │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                    API Gateway                              │   │
-│   │              (Route by model parameter)                     │   │
-│   └─────────────────────────────┬───────────────────────────────┘   │
-│                                 │                                   │
-│         ┌───────────────────────┼───────────────────────┐           │
-│         ▼                       ▼                       ▼           │
-│   ┌───────────┐           ┌───────────┐           ┌───────────┐     │
-│   │  Model A  │           │  Model B  │           │  Model C  │     │
-│   │  (8B)     │           │  (70B)    │           │  (8B-FT)  │     │
-│   │  1 GPU    │           │  4 GPUs   │           │  1 GPU    │     │
-│   └───────────┘           └───────────┘           └───────────┘     │
-│                                                                     │
-│   Use case: Different models for different tasks                    │
-│   Routing: Based on request parameter or endpoint                   │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### A/B Testing / Canary
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    CANARY DEPLOYMENT                                │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                  Traffic Splitter                           │   │
-│   │              (90% stable, 10% canary)                       │   │
-│   └─────────────────────────────┬───────────────────────────────┘   │
-│                                 │                                   │
-│               ┌─────────────────┴─────────────────┐                 │
-│               ▼                                   ▼                 │
-│   ┌───────────────────────┐           ┌───────────────────────┐     │
-│   │    Stable (90%)       │           │    Canary (10%)       │     │
-│   │    Model v1.0         │           │    Model v1.1         │     │
-│   │    FP16               │           │    INT8 (testing)     │     │
-│   └───────────────────────┘           └───────────────────────┘     │
-│                                                                     │
-│   Use case: Safe rollout of new models/configs                      │
-│   Metrics: Compare latency, quality, errors                         │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+The optimization target is minimizing `cold_start_rate * cold_start_latency` while maximizing `idle_hours * hourly_gpu_cost` savings. If your service is busy enough that cold starts rarely happen, serverless economics dominate. If traffic is spiky, the latency penalty compounds.
 
 ---
 
-## Security Considerations
+## FAQ
 
-### Security Checklist
+**Q: When is scale-to-zero actually worth it for LLMs?**
+A: When utilization is below 20%. Above that, the cold start penalty (user-facing latency) outweighs GPU savings.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                 LLM SERVING SECURITY CHECKLIST                      │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   Authentication & Authorization:                                   │
-│   ☐ API key or OAuth2 authentication                                │
-│   ☐ Role-based access control (RBAC)                                │
-│   ☐ Per-user/team rate limiting                                     │
-│   ☐ Audit logging of all requests                                   │
-│                                                                     │
-│   Network Security:                                                 │
-│   ☐ TLS/HTTPS for all endpoints                                     │
-│   ☐ VPC isolation for inference servers                             │
-│   ☐ Security groups limiting ingress                                │
-│   ☐ Private endpoints where possible                                │
-│                                                                     │
-│   Input Validation:                                                 │
-│   ☐ Maximum prompt length limits                                    │
-│   ☐ Input sanitization                                              │
-│   ☐ Prompt injection detection                                      │
-│   ☐ Content filtering (if required)                                 │
-│                                                                     │
-│   Output Safety:                                                    │
-│   ☐ Output content filtering                                        │
-│   ☐ PII detection and redaction                                     │
-│   ☐ Response length limits                                          │
-│                                                                     │
-│   Infrastructure:                                                   │
-│   ☐ Secrets management (HF tokens, API keys)                        │
-│   ☐ Container image scanning                                        │
-│   ☐ Regular security updates                                        │
-│   ☐ Backup and disaster recovery                                    │
-│                                                                     │
-│   Monitoring:                                                       │
-│   ☐ Anomaly detection on request patterns                           │
-│   ☐ Cost monitoring and alerts                                      │
-│   ☐ Error rate monitoring                                           │
-│   ☐ Latency SLA monitoring                                          │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
+**Q: Can I cold-start a 70B model in under 10 seconds?**
+A: Not yet with standard approaches. Techniques like tensor parallelism across pre-warmed nodes can hit 15-20s. True sub-10s requires always-warm replicas.
 
-### Example: Secure API Gateway Configuration
+**Q: Does quantization help cold start?**
+A: Yes. A 4-bit quantized 70B model is ~35GB instead of ~140GB, reducing download and GPU transfer time by 4x.
 
-```yaml
-# api-gateway-config.yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: llm-api-gateway
-  annotations:
-    # Rate limiting
-    nginx.ingress.kubernetes.io/limit-rps: "100"
-    nginx.ingress.kubernetes.io/limit-connections: "50"
+**Q: What is copy-on-write (COW) memory for model serving?**
+A: Multiple containers share the same physical GPU memory for model weights. Only KV cache is private per request. Replicate uses this to "clone" warm instances instantly.
 
-    # Request size limits
-    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
-
-    # Timeouts
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
-
-    # SSL
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-
-    # Auth (external auth service)
-    nginx.ingress.kubernetes.io/auth-url: "https://auth.example.com/validate"
-    nginx.ingress.kubernetes.io/auth-signin: "https://auth.example.com/login"
-spec:
-  tls:
-    - hosts:
-        - llm-api.example.com
-      secretName: llm-api-tls
-  rules:
-    - host: llm-api.example.com
-      http:
-        paths:
-          - path: /v1
-            pathType: Prefix
-            backend:
-              service:
-                name: llm-service
-                port:
-                  number: 8000
-```
-
----
-
-## Key Takeaways
-
-1. **Ray Serve for flexibility** - Easy autoscaling, multi-model, Python-native
-
-2. **KServe for Kubernetes** - Standard interface, built-in autoscaling, canary support
-
-3. **Disaggregated serving for scale** - Separate prefill/decode for better utilization
-
-4. **Security is non-negotiable** - Auth, rate limiting, input validation, monitoring
-
-5. **Start simple, scale up** - Single model → Multi-model → Disaggregated
-
-6. **Monitor everything** - Latency, throughput, errors, costs
-
----
-
-## Lab Preview
-
-### Lab 7: Ray Serve Deployment
-
-- Deploy vLLM with Ray Serve
-- Configure autoscaling
-- Implement load testing
-
-### Lab 8: EKS + KServe Deployment
-
-- Set up EKS cluster with GPU nodes
-- Deploy KServe InferenceService
-- Configure autoscaling and canary
+**Q: How do CUDA graphs affect cold start?**
+A: CUDA graph compilation adds 1-5s on first inference. Snapshot-based loading captures compiled graphs, eliminating this step on subsequent cold starts.
 
 ---
 
 ## References
 
-1. Ray Serve Documentation: https://docs.ray.io/en/latest/serve/
-2. KServe Documentation: https://kserve.github.io/website/
-3. llm-d Paper: "Disaggregated LLM Inference" (2024)
-4. OWASP LLM Security Guidelines
-
-
----
-
-## 2025-2026 Updates: Production Serving Advances
-
-### Ray Serve 2.40+: 88% Latency Reduction
-
-Ray Serve's March 2026 release introduced HAProxy integration for external load balancing:
-
-```
-Client → HAProxy (L7 routing) → Ray Serve Replicas → vLLM
-```
-
-**Key improvements:**
-- Zero-copy data path eliminates serialization overhead
-- Async request handling pipeline
-- **88% latency reduction + 11.1x throughput** vs previous versions
-- External routing (HAProxy/Envoy) recommended beyond 5K req/s
-
-**Source**: [Anyscale Blog, Mar 2026](https://www.anyscale.com/blog/ray-serve-inference-lower-latency-higher-throughput-haproxy)
-
-### Custom Request Routing: 60% TTFT Reduction
-
-Prefix-aware routing directs requests sharing common prefixes to the same replica for KV cache hits:
-
-| Configuration | TTFT P95 | Throughput | GPU Util |
-|--------------|----------|------------|----------|
-| Unified (baseline) | 850ms | 1,200 tok/s | 65% |
-| Custom routing | 340ms | 1,800 tok/s | 82% |
-| + Prefix-aware | 280ms | 2,100 tok/s | 85% |
-
-**Source**: [Anyscale Blog, Sep 2025](https://www.anyscale.com/blog/ray-serve-faster-first-token-custom-routing)
-
-### Cold Start Mitigation: Model Streaming
-
-Cold starts occur during autoscaling, spot eviction, rolling deploys, and model swaps. Loading a 70B FP16 model from disk takes **45-90 seconds**.
-
-**Solution**: Stream model weights directly from object storage to GPU memory, bypassing disk.
-
-| Method | 8B Model | 70B Model | Improvement |
-|--------|----------|-----------|-------------|
-| S3 → Disk → CPU → GPU | 15s | 90s | Baseline |
-| S3 Express → GPU (streaming) | 3s | 15s | **5-6x** |
-| Instance store (cached) | 2s | 12s | Best case |
-
-**Source**: [Azure DevBlog, May 2026](https://devblogs.microsoft.com/azure-sdk/eliminate-llm-cold-starts-load-models-up-to-6x-faster-with-azure-blob-storage-and-runai-model-streamer/)
-
-### llm-d: Disaggregated Serving Production on AWS (Apr 2026)
-
-AWS officially supports llm-d for disaggregated prefill/decode:
-- Separate prefill and decode GPU pools
-- KV cache transfer via EFA RDMA (~50ms for 2.5GB)
-- Intelligent routing based on request characteristics
-- Independent autoscaling per pool
-
-See **Module 13** for full disaggregated serving deep dive.
-
-**Source**: [AWS Blog, Apr 2026](https://aws.amazon.com/blogs/machine-learning/introducing-disaggregated-inference-on-aws-powered-by-llm-d/)
+1. Modal documentation, "Cold Start Optimization": https://modal.com/docs/guide/cold-start
+2. Baseten blog, "Sub-second Model Loading with Truss" (2024)
+3. Replicate blog, "How we run models": https://replicate.com/blog/how-we-run-models
+4. ServerlessLLM: Low-Latency Serverless Inference for LLMs (2024): https://arxiv.org/abs/2401.14351
+5. NVIDIA TensorRT-LLM, "Engine Caching for Fast Startup": https://github.com/NVIDIA/TensorRT-LLM
