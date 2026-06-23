@@ -29,35 +29,51 @@ Serving it costs more than that every single week. Forever.
 
 ---
 
-### Slide 3: Everyone
-**Every company shipping agents is paying it.**
+### Slide 3: Inference Is Everywhere
+**Every interaction with AI is an inference call. The scale is staggering.**
 
-- Stripe: 1,300 agent PRs per week. Each PR = 50+ LLM calls.
-- Spotify: 650 agent PRs per month.
-- Claude Code: 85-97% prompt cache hit rate (they OPTIMIZED this)
-- Your company: probably 10-100 LLM calls per user session.
+- **AI coding agents:** 52% of code is now AI-authored (DX, Q2 2026). 1 in 7 PRs involve AI agents (Pullflow). 84-91% of developers use AI coding tools (2025-2026 surveys).
+- **AI products:** ChatGPT, Claude, Gemini, Copilot — every chat message, every autocomplete, every agent tool call = inference.
+- **The market:** AI inference-as-a-service: $18.6B in 2025 → $23.4B in 2026 (Precedence Research). Cost per million tokens dropped 1,200x in 5 years ($60 in 2020 → $0.05 in 2025) — but volume grew even faster.
+- **The real cost:** One 50-turn coding session consumes ~1M tokens (Vantage, 2026). A 25-person team: $72K/year on Opus.
 
-> "Notice Claude Code's number: 85-97% cache hit. They didn't get that by accident. That's engineering. That's what we'll learn today."
-
-**→ But first, let's FEEL the problem.**
-
+Whether you raise PRs, chat with AI, or build agent features — you're doing LLM inference. And it's expensive at scale.
 ---
 
-### Slide 4: The Field is Moving
-**Three breakthroughs in the last 6 months.**
+### Slide 4: The Field is Moving Fast
+**Key breakthroughs in LLM inference (2022-2026).**
 
 ```mermaid
 flowchart LR
-    A[2023<br>vLLM] --> B[2024<br>DistServe]
-    B --> C[2025<br>DeepSeek V3<br>90% cost cut]
-    C --> D[2026<br>NVIDIA Dynamo<br>agentic inference]
-    C --> E[2026<br>Stanford M*<br>multimodal serving]
-    style A fill:#f3f4f6,stroke:#000
-    style B fill:#f3f4f6,stroke:#000
-    style C fill:#dcfce7,stroke:#000
-    style D fill:#dbeafe,stroke:#000
-    style E fill:#dbeafe,stroke:#000
+    A["2022<br/>FlashAttention<br/>6x memory savings"] --> B["2022<br/>Orca<br/>continuous batching"]
+    B --> C["2023<br/>vLLM<br/>PagedAttention"]
+    C --> D["2024<br/>SGLang<br/>RadixAttention"]
+    D --> E["2024<br/>DistServe<br/>disaggregated P/D"]
+    E --> F["2025<br/>DeepSeek V3<br/>MLA: 90% cost cut"]
+    F --> G["2026<br/>NVIDIA Dynamo<br/>agentic inference"]
+    F --> H["2026<br/>Stanford M*<br/>multimodal serving"]
+
+    style A fill:#f3f4f6,stroke:#000,color:#1e293b
+    style B fill:#f3f4f6,stroke:#000,color:#1e293b
+    style C fill:#fef3c7,stroke:#000,color:#1e293b
+    style D fill:#fef3c7,stroke:#000,color:#1e293b
+    style E fill:#dcfce7,stroke:#000,color:#1e293b
+    style F fill:#dcfce7,stroke:#000,color:#1e293b
+    style G fill:#dbeafe,stroke:#000,color:#1e293b
+    style H fill:#dbeafe,stroke:#000,color:#1e293b
 ```
+
+Each innovation solved a specific bottleneck:
+- **FlashAttention** (2022): tiling attention in SRAM, no N² matrix in HBM
+- **Orca** (2022): iteration-level scheduling, continuous batching
+- **vLLM** (2023): PagedAttention, virtual memory for KV cache, 24x over HF
+- **SGLang** (2024): radix tree prefix cache, 5x cache hit rate
+- **DistServe** (2024): separate prefill and decode onto different GPUs
+- **DeepSeek V3** (2025): MLA compresses KV 56x, 90% cost reduction
+- **NVIDIA Dynamo** (2026): KV-aware routing for agentic sessions
+- **Stanford M*** (2026): Walk Graphs for multimodal composite models
+
+> "This workshop gives you the foundations to understand ALL of these. Let's start."
 
 > "This workshop gives you the foundations to evaluate any new paper or tool. Let's start by experiencing the problem."
 
@@ -70,161 +86,230 @@ Chapters 00-06 of the book. Chapters 07-11 (multimodal, K8s, Ray) are in the rep
 
 ---
 
-### Slide 6 → DEMO A: Feel the Pain
-**Let's load Mistral-7B and see what happens.**
 
+
+---
+
+### DEMO A: Feel the Pain
 > `demos/demo_a_feel_the_pain.ipynb` (5 min)
 > 
 > What the audience sees:
 > 1. "14.5 GB consumed just by weights"
-> 2. "TTFT: 250ms. That's how long before the user sees ANYTHING."
-> 3. "Longer prompt → 1200ms TTFT. It gets WORSE."
-> 4. "Throughput: 40 tok/s. One user saturates the entire GPU."
+> 2. "TTFT: grows from 90ms to 5000ms as context scales to 16K"
+> 3. "5 users queue up: last one waits 5x longer than first"
+> 4. "KV cache grows ~1 GB per user at 8K context"
 >
 > End with: "Why? Let's find out."
 
 ---
 
-## PART 1: "Where did all my memory go?" (20 min)
+## PART 1: Foundations (25 min)
 
-> **Transition:** "We just saw 14.5 GB vanish and terrible latency. Let's understand why."
+> **Transition:** "We saw the problems. Now let's understand the machine that causes them."
 
-### Slide 7: One Transformer Layer
-**Input → Attention → FFN → Output. Repeat 32 times.**
+### GROUP 1: What's inside the model
 
-```mermaid
-flowchart LR
-    A[Input<br>token] --> B[Attention<br>Q K V O]
-    B --> C[FFN<br>gate up down]
-    C --> D[Output]
-    style B fill:#dbeafe,stroke:#000
-    style C fill:#fef3c7,stroke:#000
-```
-
-Each layer has weights: attention weights + FFN weights.
-32 layers × weights per layer = 14.5 GB in FP16.
-
-> "OK so weights are fixed at 14.5 GB. But we had 65 GB left on the A100. Should be plenty, right?"
-
-**→ Wrong. Here's why.**
-
----
-
-### Slide 8: The KV Cache Grows With Every User
-**Weights are fixed. KV cache is not.**
-
-Every token a user has in their conversation costs:
-`2 × 32 layers × 8 KV heads × 128 dim × 2 bytes = 131 KB`
-
-One user at 4K context: 131 KB × 4096 = **524 MB**
-80 users at 4K context: 524 MB × 80 = **42 GB**
-
-> "You had 65 GB free. 42 GB is now KV cache. Plus 8 GB overhead. You're at 64.5 / 80 GB."
-
-**→ So memory is tight. But why does that make each token SLOW?**
-
----
-
-### Slide 9: Prefill vs Decode
-**Two phases. One is fast. One is the bottleneck.**
+### Slide 7: The Inference Pipeline
+**Text in → tokens → 32 layers → next token out. Runs once PER token.**
 
 ```mermaid
 flowchart LR
-    A[User prompt<br>arrives] --> B[PREFILL<br>Process all tokens<br>in parallel]
-    B --> C[DECODE<br>Generate one<br>token at a time]
-    C --> D[Token 1]
-    D --> E[Token 2]
-    E --> F[Token 3...]
-    style B fill:#dcfce7,stroke:#000
-    style C fill:#ffe4e6,stroke:#000
+    A["Input Text"] --> B["Tokenizer"]
+    B --> C["Embedding<br/>(128K x 4096)"]
+    C --> D["32 Transformer<br/>Layers"]
+    D --> E["LM Head<br/>(4096 x 128K)"]
+    E --> F["Next Token"]
+
+    style A fill:#ffe4e6,stroke:#000,color:#1e293b
+    style B fill:#f3f4f6,stroke:#000,color:#1e293b
+    style C fill:#dbeafe,stroke:#000,color:#1e293b
+    style D fill:#dcfce7,stroke:#000,color:#1e293b
+    style E fill:#f3e8ff,stroke:#000,color:#1e293b
+    style F fill:#fef3c7,stroke:#000,color:#1e293b
 ```
 
-Prefill: compute-bound (parallel, uses GPU compute fully).
-Decode: memory-bound (sequential, reads all weights + KV cache per token).
-
-> "Decode reads 14.5 GB of weights + 42 GB of KV cache from memory. Every. Single. Token."
-
-**→ How fast can we read that?**
+To generate 100 tokens, this runs 100 times. The 32 layers are where 95% of memory lives.
 
 ---
 
-### Slide 10: The Bandwidth Wall
-**GPU memory hierarchy determines your speed.**
+### Slide 8: Inside One Transformer Layer
+**Each layer: Attention + MLP. Same structure x32, different learned weights.**
 
-| Level | Size | Bandwidth |
-|-------|------|-----------|
-| SRAM | 20 MB | 19 TB/s |
-| L2 | 40 MB | — |
-| HBM | 80 GB | **2 TB/s** |
+```mermaid
+flowchart LR
+    A["Input"] --> B["Attention<br/>(which tokens matter?)"]
+    B --> C["MLP<br/>(4096 to 14336 to 4096)"]
+    C --> D["Output"]
 
-Decode reads 14.5 GB from HBM every step.
-At 2 TB/s: `14.5 GB / 2 TB/s = 7.25 ms per token = 138 tokens/sec max`
+    style A fill:#ffe4e6,stroke:#000,color:#1e293b
+    style B fill:#dbeafe,stroke:#000,color:#1e293b
+    style C fill:#dcfce7,stroke:#000,color:#1e293b
+    style D fill:#ccfbf1,stroke:#000,color:#1e293b
+```
 
-> "The GPU has 312 TFLOPS of compute. We're using almost none of it."
-
-**→ Can we fix this with a faster GPU?**
-
----
-
-### Slide 11: The Roofline Says No
-**You're 80x below peak compute.**
-
-Arithmetic intensity of decode: `2 FLOP/byte`
-Ridgeline: `156 FLOP/byte`
-
-More FLOPS won't help. You're stuck at the memory bandwidth ceiling.
-
-> "The only ways out: read LESS data, or serve MORE users per read."
+- **Attention:** For the current token, which earlier tokens should influence its meaning?
+- **MLP:** Transform the representation. Stores factual knowledge. Largest component.
 
 ---
 
-### 🎯 DEMO B: Memory Equation (5 min)
+### Slide 9: Weight Distribution
+**Where the 14.5 GB lives.**
+
+| Component | Size | % |
+|-----------|------|---|
+| Attention (Q,K,V,O x 32 layers) | 8.0 GB | 50% |
+| MLP (gate, up, down x 32 layers) | 6.8 GB | 42% |
+| Embedding + LM Head | 1.0 GB | 6% |
+| **Total** | **~16 GB** | |
+
+---
+
+### 🎯 DEMO B: Architecture + Weights (5 min)
 > `demos/demo_b_memory_equation.ipynb`
-> Derive: weights, KV per token, max users. Plot KV growth curve.
-> End with: "Now you can calculate exactly how many users any GPU supports."
+> 1. Load Mistral-7B config: 32 layers, 4096 hidden, 8 KV heads
+> 2. Derive weight sizes: Attention 8 GB, MLP 6.8 GB, Embedding 1 GB
+> 3. Pie chart showing 50%/42%/6% distribution
+> 4. Total: 7.24B params x 2 bytes = 14.5 GB
+>
+> Proves: the model is 14.5 GB fixed. This is what gets read every decode step.
 
 ---
 
-### Slide 12: The Batch-Latency Tradeoff
-**Batching amortizes the weight read. But there's a catch.**
+### GROUP 2: Why decode is slow
 
-Batch=1: read 14.5 GB, produce 1 token. Wasted bandwidth.
-Batch=80: read 14.5 + 42 GB, produce 80 tokens. Better utilization.
+### Slide 10: Prefill vs Decode
+**Two phases. Prefill is fast (parallel). Decode is the bottleneck (sequential).**
 
-But: more users = more KV to read = slower per user.
-Your SLO determines the actual max batch.
+**Prefill:** All input tokens processed in parallel.
+- GPU computes attention across all positions at once. Compute-bound. Fast.
+
+**Decode:** One token per step. Each step reads ALL 14.5 GB of weights from memory.
+- Sequential. Memory-bound. This is THE bottleneck.
 
 ---
 
-### Slide 13: The Capacity Equation
-**Three numbers. That's all you need.**
+### Slide 11: GPU Memory Hierarchy
+**The model streams from HBM. That's the speed ceiling.**
+
+| Memory Level | Size | Bandwidth |
+|-------|------|-----------|
+| SRAM (on-chip) | 20 MB | 19 TB/s |
+| HBM (GPU memory) | 80 GB | **2 TB/s** |
+
+Model is 700x larger than SRAM. Must stream from HBM.
+Each decode step: `14.5 GB / 2 TB/s = 7.25 ms per token = ~138 tok/s ceiling`
+
+---
+
+### Slide 12: Roofline: Decode is Memory-Bound
+**80x below compute peak. More FLOPS won't help.**
+
+- Arithmetic intensity of decode: **2 FLOP/byte**
+- Ridgeline (compute bottleneck): **156 FLOP/byte**
+- Gap: **80x** of compute sits idle
+
+Only two escapes: read LESS data, or serve MORE users per read.
+
+---
+
+### 🎯 DEMO C: Prefill vs Decode (5 min)
+> `demos/demo_c_prefill_vs_decode.ipynb`
+> 1. Measures prefill time at 128-8K tokens (shows linear scaling, fast)
+> 2. Measures per-token decode latency (shows ~constant, memory-bound)
+> 3. Side-by-side chart: prefill (green, parallel) vs decode (red, sequential)
+>
+> Proves: decode reads 14.5 GB every step. GPU compute sits 80% idle.: TTFT scaling proved prefill cost.
+> Per-token decode timing proved the bandwidth wall.
+> Speaker walks through those results explaining the roofline connection.
+
+---
+
+### GROUP 3: KV cache and capacity
+
+### Slide 13: Why the KV Cache Exists
+**Without it: recompute attention for ALL previous tokens every step. O(n squared).**
+
+During decode, attention needs K and V vectors from ALL previous tokens.
+- Without cache: recompute everything. Gets quadratically slower.
+- With cache: store K,V vectors. O(n) but costs memory per user.
+
+Every production system uses the KV cache. The question: how much memory?
+
+---
+
+### Slide 14: KV Cache Growth
+**Every token x every layer x every head. Adds up fast.**
 
 ```
-Available VRAM = GPU_total − weights − overhead
-Max users = Available / (131 KB × context_length)
+KV per token = 2 (K + V) x 32 layers x 8 KV heads x 128 dim x 2 bytes = 131 KB
 ```
 
-For Mistral-7B on A100-80GB:
-`(80 − 14.5 − 8) / (0.131 × 4096) = 107 users`
+| Scenario | KV Memory |
+|----------|-----------|
+| 1 user, 4K context | 524 MB |
+| 1 user, 16K context | 2.1 GB |
+| 80 users, 4K context | **42 GB** |
+| 80 users, 16K context | 168 GB (OOM) |
+
+Weights: fixed. KV cache: the variable that kills you.
 
 ---
 
-### Slide 14: Which GPU?
-**More VRAM + more bandwidth = cheaper per token.**
+### Slide 15: The Capacity Equation
+**Three numbers decide max users.**
 
-| GPU | VRAM | Max Users | $/hr | $/M tokens |
+```
+Available = GPU_total - weights - overhead
+Max users = Available / (131 KB x context_length)
+```
+
+A100-80GB: 80 - 14.5 - 8 = 57.5 GB available
+- At 4K context: **109 users**
+- At 16K context: **27 users**
+
+---
+
+### Slide 16: Latency SLO Determines Your Batch Size
+**You can't just max out batch size. Users have latency expectations.**
+
+Two SLO metrics:
+- **TTFT** (Time to First Token): user waits before seeing anything. Target: < 500ms.
+- **ITL** (Inter-Token Latency): time between streamed tokens. Target: < 50ms.
+
+Higher batch = better throughput but worse per-user latency.
+Your SLO caps the batch size, which caps your throughput and revenue per GPU.
+
+```
+Throughput = batch_size x (1000 / ITL_ms) tokens/sec
+Max batch = whatever keeps ITL < SLO target
+```
+
+---
+
+### Slide 17: GPU Selection
+
+| GPU | VRAM | Bandwidth | Max Users (4K) | $/M tokens |
 |-----|------|-----------|------|-----------|
-| A100-40 | 40 GB | 32 | $2.50 | $0.45 |
-| A100-80 | 80 GB | 107 | $3.50 | $0.28 |
-| H100-80 | 80 GB | 107 | $4.00 | $0.16 |
-| H200-141 | 141 GB | 237 | $5.50 | $0.13 |
+| A100-80 | 80 GB | 2.0 TB/s | 109 | $0.28 |
+| H100-80 | 80 GB | 3.4 TB/s | 109 | $0.16 |
+| H200-141 | 141 GB | 4.8 TB/s | 237 | $0.13 |
+
+More VRAM + more bandwidth = cheaper per token.
 
 ---
 
-### 🎯 DEMO C: Capacity Calculator (5 min)
-> `demos/demo_c_capacity_calculator.ipynb`
-> Slide users, watch memory fill, see GPU comparison chart.
-> End with: "Now we know the limits. Can we push them?"
+### 🎯 DEMO D: KV Cache Growth + Capacity Calculator (5 min)
+> `demos/demo_d_capacity_calculator.ipynb`
+> 1. Derive: KV per token = 2 x 32 x 8 x 128 x 2 = 131 KB
+> 2. Plot: KV cache growth curve as users x context scales
+> 3. Show: 80 users at 4K = 42 GB (fills the GPU)
+> 4. Interactive: pick model, precision, GPU, context. Watch memory fill.
+> 5. GPU comparison: $/M tokens across A100, H100, H200
+>
+> Proves: KV cache is the variable cost. Capacity equation works.
+> Interactive: pick model, precision, GPU, context. Watch memory fill. See $/M tokens.
+
+> **End of Part 1:** "Now we know the machine, why it's slow, and what limits capacity. Next: how to push those limits."
 
 ---
 
@@ -271,7 +356,7 @@ Decompress at attention time. Why DeepSeek-V3 runs at 90% lower cost.
 ---
 
 ### 🎯 DEMO D: Attention Comparison (4 min)
-> `demos/demo_d_attention_comparison.ipynb`
+> `demos/demo_e_attention_comparison.ipynb`
 > Bar chart: MHA 524 KB vs GQA 131 KB vs MLA 9.3 KB.
 > End with: "OK, we've reduced the per-token cost. Now: can we reduce the number of tokens stored?"
 
@@ -347,7 +432,7 @@ Stripe agents: 85-97% cache hit rate.
 ---
 
 ### 🎯 DEMO E: Prefix Caching (5 min)
-> `demos/demo_e_prefix_caching.ipynb`
+> `demos/demo_f_prefix_caching.ipynb`
 > 10 requests cold (all ~200ms) → warm (requests 2-10 at ~12ms).
 > Bar chart showing the 15x improvement.
 
@@ -376,7 +461,7 @@ Budget = 10-20% of full cache. Fits 5-10x longer context.
 ---
 
 ### 🎯 DEMO F: Smart Eviction (5 min)
-> `demos/demo_f_smart_eviction.ipynb`
+> `demos/demo_g_smart_eviction.ipynb`
 > Real attention heatmap showing power law. H2O quality comparison.
 
 ---
@@ -459,7 +544,7 @@ flowchart LR
 ---
 
 ### 🎯 DEMO H: Quantization + Batching (8 min)
-> `demos/demo_h_quantization_batching.ipynb`
+> `demos/demo_i_quantization_batching.ipynb`
 > 1. Real FP16 vs INT8 vs INT4: memory + throughput side by side
 > 2. Real static vs continuous batching: measure padding waste
 > 3. Speculative decoding (vLLM if available, AWS alternative otherwise)
@@ -609,7 +694,7 @@ flowchart LR
 ---
 
 ### 🎯 DEMO G: Engine Benchmark (5 min)
-> `demos/demo_g_engine_comparison.ipynb`
+> `demos/demo_h_engine_comparison.ipynb`
 > Same model, same prompt: HF → vLLM → SGLang. Chart + cost table.
 > End with: "Same hardware. 20x cheaper per token."
 
