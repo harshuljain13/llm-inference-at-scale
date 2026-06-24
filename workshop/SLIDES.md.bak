@@ -6,7 +6,7 @@ Transitions are explicit. The audience should never wonder "why are we talking a
 
 ---
 
-## PART 0: Problem Statement (15 min)
+## OPENING: "Your model is slow. Let's find out why." (15 min)
 
 ### Slide 1: Title
 **LLM Inference at Scale: From Memory Equation to Production Engines**
@@ -86,22 +86,7 @@ Chapters 00-06 of the book. Chapters 07-11 (multimodal, K8s, Ray) are in the rep
 
 ---
 
-### Slide 6: What We Will Solve
-**By the end: you will know WHY inference is slow, 7 techniques to fix it, and which engine to use.**
 
-The 20x improvement stack we will prove today:
-
-| Step | Optimization | Cumulative |
-|------|-------------|-----------|
-| 0 | Baseline (HF, FP16, no batching) | 1x |
-| 1 | + GQA (4x less KV per token) | 4x |
-| 2 | + INT4 weights (4x less weight memory) | 7x |
-| 3 | + PagedAttention (no fragmentation) | 10x |
-| 4 | + Prefix caching (shared prompts) | 13x |
-| 5 | + Continuous batching (no waste) | 16x |
-| 6 | + Speculative decoding (2-3x decode) | 20x |
-
-> "Let's feel the problem first."
 
 ---
 
@@ -167,23 +152,7 @@ flowchart LR
 
 ---
 
-### Slide 9: What Q, K, V Are
-**Three projections from one vector. This is the core of attention.**
-
-Every token's hidden state (4096 numbers) gets projected into three vectors:
-- **Query (Q):** "What am I looking for?" (the current token)
-- **Key (K):** "What do I contain?" (each previous token)
-- **Value (V):** "What information do I carry?" (each previous token)
-
-Score = dot(Q, K). High score = relevant token. Output = weighted sum of V by scores.
-
-Each layer has 32 Q heads and 8 KV heads (GQA). Head dimension: 128.
-
-> "These K and V vectors are what get stored in the KV cache. That's why it grows."
-
----
-
-### Slide 10: Weight Distribution
+### Slide 9: Weight Distribution
 **Where the 14.5 GB lives.**
 
 | Component | Size | % |
@@ -219,37 +188,16 @@ Each layer has 32 Q heads and 8 KV heads (GQA). Head dimension: 128.
 
 ---
 
-### Slide (Foundations): How Prefill and Decode Create KV Cache
-**Prefill computes K,V for all input tokens at once. Decode adds one K,V pair per step.**
+### Slide 11: GPU Memory Hierarchy
+**The model streams from HBM. That's the speed ceiling.**
 
-**During prefill:** The model computes K and V for every input token simultaneously. All of these get stored in the KV cache. A 4K token prompt = 4,096 new K,V pairs cached.
+| Memory Level | Size | Bandwidth |
+|-------|------|-----------|
+| SRAM (on-chip) | 20 MB | 19 TB/s |
+| HBM (GPU memory) | 80 GB | **2 TB/s** |
 
-**During decode:** Each new token generated produces one new K,V pair that gets appended to the cache. But attention must READ all previous K,V pairs to compute the score for the new token.
-
-This is why KV cache grows linearly with sequence length:
-- More input tokens = bigger initial cache (prefill cost)
-- More generated tokens = cache keeps growing (decode cost)
-- More concurrent users = multiply everything by N
-
-> "Now let's look at how fast the GPU can read all this data."
-
----
-
-### Slide 11: How Decode Reads Weights (HBM to SRAM)
-**Every decode step: 14.5 GB streams from HBM through the GPU's streaming multiprocessors.**
-
-| Memory Level | Size | Bandwidth | Role |
-|-------|------|-----------|------|
-| SRAM (on-chip, per SM) | 20 MB | 19 TB/s | Compute happens here |
-| HBM (GPU main memory) | 80 GB | **2 TB/s** | Weights live here |
-
-The flow: HBM -> L2 cache -> SRAM (SM registers) -> compute -> discard -> fetch next slice.
-
-The model is 700x larger than all SRAM combined. It cannot fit on-chip.
-Every decode step streams the ENTIRE 14.5 GB through this pipe.
-At 2 TB/s: `14.5 GB / 2 TB/s = 7.25 ms per token = ~138 tok/s ceiling`
-
-This is why decode is memory-bandwidth bound, not compute bound.
+Model is 700x larger than SRAM. Must stream from HBM.
+Each decode step: `14.5 GB / 2 TB/s = 7.25 ms per token = ~138 tok/s ceiling`
 
 ---
 
@@ -365,9 +313,9 @@ More VRAM + more bandwidth = cheaper per token.
 
 ---
 
-## PART 2: Model Optimizations (20 min)
+## PART 2: "The first free lunch: attention architecture." (12 min)
 
-> **Transition:** "We know the limits. First optimization: reduce what the model stores and reads."
+> **Transition:** "We're stuck at 107 users on A100-80. The 131 KB per token is the bottleneck. Can we reduce it?"
 
 ### Slide 15: GQA Already Saved You
 **Without GQA, that 131 KB would be 524 KB.**
@@ -407,16 +355,6 @@ Decompress at attention time. Why DeepSeek-V3 runs at 90% lower cost.
 
 ---
 
-### Slide (Model Opt): Weight Quantization
-**FP16 -> INT8 -> INT4. Same model, 4x less memory.**
-
-FP16: 14.5 GB. INT8: 7.2 GB (2x). INT4 (NF4): 3.6 GB (4x).
-More room for KV cache = more users. Minor quality loss at INT4 on reasoning.
-
-> "We've cut the model size AND the KV size. Now let's optimize the cache itself."
-
----
-
 ### 🎯 DEMO D: Attention Comparison (4 min)
 > `demos/demo_e_attention_comparison.ipynb`
 > Bar chart: MHA 524 KB vs GQA 131 KB vs MLA 9.3 KB.
@@ -424,9 +362,9 @@ More room for KV cache = more users. Minor quality loss at INT4 on reasoning.
 
 ---
 
-## PART 3: KV Cache Optimizations (20 min)
+## PART 3: "Four ways to fix the KV cache." (20 min)
 
-> **Transition:** "Model is smaller. Now: optimize what's stored in the KV cache."
+> **Transition:** "Attention architecture determines cost per token. These four techniques reduce what's actually stored."
 
 ### Slide 18: Four Levers
 
@@ -538,9 +476,9 @@ Quality loss < 0.1% on most tasks (KV values are less sensitive than weights).
 
 ---
 
-## PART 4: Other Optimizations (15 min)
+## PART 4: "Three more levers beyond the KV cache." (18 min)
 
-> **Transition:** "KV cache is optimized. Now: fix the decode loop itself."
+> **Transition:** "KV cache is one axis. These three optimize the model weights and the generation loop."
 
 ### Slide 24: Weight Quantization
 **Same model. 4x less memory. Minor quality loss.**
@@ -613,9 +551,9 @@ flowchart LR
 
 ---
 
-## PART 5: Engines (12 min)
+## PART 5: "Who implements all of this?" (12 min)
 
-> **Transition:** "7 optimizations. The good news: engines implement ALL of them for you."
+> **Transition:** "You've seen 7 optimizations. The good news: you don't implement them yourself. Engines do."
 
 ### Slide 27: Three Engines, One Decision
 
@@ -762,20 +700,20 @@ flowchart LR
 
 ---
 
-## CLOSING (10 min)
+## CLOSING: "You now know the full stack." (13 min)
 
 ### Slide 32: Stack Everything
 **Waterfall: baseline to 20x.**
 
-| Optimization | Cumulative | Category |
-|---|---|---|
-| Baseline (HF, FP16, no batching) | 1x | -- |
-| + GQA (4x less KV per token) | 4x | Model |
-| + INT4 weights (4x less weight memory) | 7x | Model |
-| + PagedAttention (no fragmentation) | 10x | KV Cache |
-| + Prefix caching (shared system prompts) | 13x | KV Cache |
-| + Continuous batching (no padding waste) | 16x | Loop |
-| + Speculative decoding (2-3x decode speed) | 20x | Loop |
+| Optimization | Cumulative Improvement |
+|---|---|
+| Baseline (HF, FP16) | 1x |
+| + GQA (4x less KV) | ~1x (already in model) |
+| + INT4 weights | ~4x (more users fit) |
+| + PagedAttention | ~8x (no fragmentation) |
+| + Prefix cache | ~8x + 15x TTFT |
+| + Continuous batching | ~16x throughput |
+| + Speculative decode | ~20x |
 
 > "Same GPU. Same model. 20x more capacity."
 
