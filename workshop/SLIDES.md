@@ -417,355 +417,146 @@ More room for KV cache = more users. Minor quality loss at INT4 on reasoning.
 
 ---
 
-### 🎯 DEMO D: Attention Comparison (4 min)
+### 🎯 DEMO E: Model Optimizations (8 min)
 > `demos/demo_e_attention_comparison.ipynb`
-> Bar chart: MHA 524 KB vs GQA 131 KB vs MLA 9.3 KB.
-> End with: "OK, we've reduced the per-token cost. Now: can we reduce the number of tokens stored?"
+> 1. MHA vs GQA vs MLA: memory per token bar chart (524 KB vs 131 KB vs 9.3 KB)
+> 2. FP16 vs INT8 vs INT4: real model loading, measure GPU memory + throughput
+> 3. Show: GQA (4x KV reduction) + INT4 (4x weight reduction) = first 7x of our 20x stack
+>
+> End with: "Model is smaller. Now: optimize what's stored in the KV cache."
 
 ---
 
-## PART 3: KV Cache Optimizations (20 min)
+## PART 3: KV Cache + Serving Optimizations + Engines (45 min)
 
-> **Transition:** "Model is smaller. Now: optimize what's stored in the KV cache."
-
-### Slide 18: Four Levers
-
-```mermaid
-flowchart LR
-    A[PagedAttention<br>No fragmentation] --> B[Prefix Cache<br>Reuse across users]
-    B --> C[Smart Eviction<br>Keep only what matters]
-    C --> D[KV Quantization<br>Fewer bits per value]
-    style A fill:#dbeafe,stroke:#000
-    style B fill:#dcfce7,stroke:#000
-    style C fill:#f3e8ff,stroke:#000
-    style D fill:#fef3c7,stroke:#000
-```
-
-> "Each gives 2-10x. They're orthogonal. Stack all four."
+> **Transition:** "Model is smaller (GQA + INT4). Now: optimize serving. Each concept → immediate demo."
 
 ---
 
-### Slide 19: PagedAttention
-**Like virtual memory for your GPU.**
+### Slide 18: PagedAttention
+**Virtual memory for KV cache. No fragmentation. 4x more users.**
 
-```mermaid
-flowchart LR
-    subgraph BEFORE["Without PagedAttention"]
-        U1B[User 1<br>allocated 4K] ~~~ GAP1[GAP<br>wasted]
-        GAP1 ~~~ U2B[User 2<br>allocated 4K]
-        U2B ~~~ GAP2[GAP<br>wasted]
-    end
-    subgraph AFTER["With PagedAttention"]
-        PT[Page Table] --> P1[Block 1<br>User 1]
-        PT --> P2[Block 2<br>User 2]
-        PT --> P3[Block 3<br>User 1]
-        PT --> P4[Block 4<br>User 2]
-    end
-    style GAP1 fill:#ffe4e6,stroke:#000
-    style GAP2 fill:#ffe4e6,stroke:#000
-    style PT fill:#dbeafe,stroke:#000
-    style P1 fill:#dcfce7,stroke:#000
-    style P2 fill:#fef3c7,stroke:#000
-    style P3 fill:#dcfce7,stroke:#000
-    style P4 fill:#fef3c7,stroke:#000
-```
+Without: contiguous pre-allocation, 50-70% wasted to fragmentation.
+With: page table with small non-contiguous blocks. Allocated on demand.
 
-Problem: pre-allocating contiguous KV blocks wastes 50-70% to fragmentation.
-Solution: page table with small blocks. Non-contiguous. Allocated on demand.
+### Slide 19: Continuous Batching
+**Static batch pads to longest request. Continuous: each finishes independently.**
 
-Result: **4x more concurrent users** on same hardware.
-Built into vLLM. Zero code change.
+Static: short requests waste compute waiting for long ones.
+Continuous: slot new requests in as old ones complete. 2-3x throughput.
 
-> "Fragmentation fixed. But every user still pays full prefill. Can we avoid that?"
+### Slide 20: vLLM Architecture
+**The engine that implements both. One command to start.**
+
+API -> Scheduler (continuous batching) -> KV Block Manager (PagedAttention) -> GPU Workers.
+24x throughput over HuggingFace. Default choice for most teams.
+
+### 🎯 DEMO: vLLM Baseline Benchmark
+> Start vLLM server. Run same test as HF baseline. See combined speedup from PagedAttention + continuous batching.
 
 ---
 
-### Slide 20: Prefix Caching
-**System prompt: computed once. Reused forever.**
+### Slide 21: Prefix Caching
+**System prompt: computed once. Reused forever. 15x TTFT improvement.**
 
-Request 1: [system prompt 2000 tokens] → prefill (200ms) + decode
-Request 2-N: [system prompt] → CACHE HIT (0ms) + decode only
+Request 1: [system prompt] prefilled (200ms) + decode.
+Request 2-N: CACHE HIT (0ms) + decode only.
 
-Anthropic charges 10% for cached tokens. They save 90%.
-Stripe agents: 85-97% cache hit rate.
+Anthropic charges 10% for cached tokens. Stripe agents: 85-97% hit rate.
+vLLM flag: `--enable-prefix-caching`
 
-> "From 200ms to 0ms for returning users. But what about the tokens we ARE caching? Do we need all of them?"
-
----
-
-### 🎯 DEMO E: Prefix Caching (5 min)
-> `demos/demo_f_prefix_caching.ipynb`
-> 10 requests cold (all ~200ms) → warm (requests 2-10 at ~12ms).
-> Bar chart showing the 15x improvement.
+### 🎯 DEMO: Prefix Caching
+> Restart vLLM with `--enable-prefix-caching`. Cold batch vs warm batch. Show TTFT drop.
 
 ---
 
-### Slide 21: NVIDIA Dynamo's Agentic Pattern
-**Cache as a distributed session store.**
+### Slide 22: KV Quantization
+**FP16 KV to FP8: 2x more users. One flag.**
 
-Agent: tool call → SUSPEND (KV cached with TTL) → resume → tool call → SUSPEND
+Stores K,V values in 8 bits instead of 16. Half the memory for same KV cache.
+Quality loss < 0.1% (KV values are less sensitive than weights).
+vLLM flag: `--kv-cache-dtype fp8`
 
-11.7x read/write ratio. KV-aware routing. Priority eviction.
-The frontier: treating KV cache like a database, not a buffer.
-
----
-
-### Slide 22: Smart Eviction (H2O)
-**90% of tokens contribute almost nothing.**
-
-Attention follows a power law: 5% of tokens get 80% of the attention weight.
-Heavy Hitter Oracle: keep those + a recent sliding window. Evict the rest.
-
-Budget = 10-20% of full cache. Fits 5-10x longer context.
-
-> "Kept 10% of the cache, lost <2% quality. But what about the values themselves? Can we make them smaller?"
+### 🎯 DEMO: KV Quantization Stress Test
+> Restart vLLM with `--kv-cache-dtype fp8`. Send 20 concurrent requests. Show all fit without OOM.
 
 ---
 
-### 🎯 DEMO F: Smart Eviction (5 min)
-> `demos/demo_g_smart_eviction.ipynb`
-> Real attention heatmap showing power law. H2O quality comparison.
+### Slide 23: Speculative Decoding
+**Draft model generates 5 tokens fast. Main model verifies all 5 in one pass.**
+
+- Draft (1B): ~1ms for 5 candidates (cheap, sequential)
+- Main (7B): ONE forward pass to verify all 5 (same cost as 1 token)
+- Accepted tokens: free. Rejected: resample from that point.
+- Acceptance rate: 70-85%. Net: 2-3x decode speed. Same output quality.
+
+vLLM flag: `--speculative-model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --num-speculative-tokens 5`
+
+### 🎯 DEMO: Speculative Decoding
+> Restart vLLM with speculative flags. Generate longer output. Show decode speedup.
 
 ---
 
-### Slide 23: KV Quantization
-**FP16 → INT8: 2x more users. One config flag.**
+### Slide 24: The Problem vLLM Doesn't Solve Well
+**Hash-based prefix matching misses partial overlaps.**
 
-`--kv-cache-dtype fp8` in vLLM. Done.
-Quality loss < 0.1% on most tasks (KV values are less sensitive than weights).
+vLLM hashes prompt prefixes. If two prompts share 90% but differ at byte 3, no cache hit.
+For agents with multi-turn conversations, the shared context changes slightly each turn.
+Need: tree-based matching that finds the LONGEST common prefix automatically.
 
-> "OK. We've squeezed the KV cache 4 ways. What about the model weights and the decode loop itself?"
+### Slide 25: SGLang and RadixAttention
+**Radix tree: finds longest matching prefix. 5x cache hit rate over vLLM.**
 
----
+All requests with shared system prompt share ONE cached prefix node.
+Branch at the point where they diverge. Automatic, no configuration.
+Also: constrained decoding for structured output (JSON schema, regex).
 
-## PART 4: Other Optimizations (15 min)
+Best for: agents with system prompts, multi-turn chat, structured output.
 
-> **Transition:** "KV cache is optimized. Now: fix the decode loop itself."
-
-### Slide 24: Weight Quantization
-**Same model. 4x less memory. Minor quality loss.**
-
-FP16: 14.5 GB (baseline)
-INT8: 7.2 GB (2x compression)
-INT4 (NF4): 3.6 GB (4x compression)
-
-More room for KV cache = more users.
-Minor quality loss at INT4 on reasoning. For serving: quantize.
-
-> "Smaller weights. But we're still generating one token at a time in a loop. Can we break that?"
+### 🎯 DEMO: SGLang
+> Kill vLLM. Start SGLang. Run same prefix test. Show RadixAttention advantage.
 
 ---
 
-### Slide 25: Continuous Batching
-**Static batching wastes 50%+ of GPU time.**
+### Slide 26: TensorRT-LLM
+**Compile once. Run at hardware peak. NVIDIA only.**
 
-```mermaid
-flowchart LR
-    A[Request 1<br>needs 16 tokens] --> B[Padded to 128<br>112 wasted]
-    C[Request 2<br>needs 128 tokens] --> D[Full 128<br>0 wasted]
-    style B fill:#ffe4e6,stroke:#000
-    style D fill:#dcfce7,stroke:#000
-```
+Build phase (offline): fuse layers, select optimal kernels for YOUR specific GPU.
+Runtime: CUDA graphs (zero kernel launch overhead) + XQA kernels + FP8 native.
 
-Static: all requests padded to max length. Short ones waste compute on padding.
-Continuous: each request finishes independently. Slot in new ones immediately.
+2x throughput over vLLM on same hardware. Tradeoff: compile step (minutes), NVIDIA-only.
+Cannot demo live in 2 minutes (requires offline compilation).
 
-Result: 2-3x throughput improvement. Built into vLLM/SGLang.
+### Slide 27: NVIDIA Dynamo
+**The orchestration layer above engines. KV cache as a distributed session store.**
 
-> "No more padding waste. But decode is still sequential. One token per step. Can we go faster?"
+Agent: tool call -> suspend (KV cached with TTL) -> resume -> tool call -> suspend.
+11.7x read/write ratio. KV-aware routing. Priority-based eviction.
 
----
-
-### Slide 26: Speculative Decoding
-**Draft fast. Verify cheap.**
-
-```mermaid
-flowchart LR
-    subgraph DRAFT["Draft Model (1B, fast)"]
-        D1[tok1] --> D2[tok2] --> D3[tok3] --> D4[tok4] --> D5[tok5]
-    end
-    subgraph VERIFY["Main Model (7B, one pass)"]
-        V[Verify all 5<br>in parallel]
-    end
-    D5 --> V
-    V --> ACC[4/5 accepted ✓]
-    V --> REJ[1 rejected ✗<br>resample]
-    style DRAFT fill:#dbeafe,stroke:#000
-    style V fill:#fef3c7,stroke:#000
-    style ACC fill:#dcfce7,stroke:#000
-    style REJ fill:#ffe4e6,stroke:#000
-```
-
-- Draft model generates 5 candidates sequentially (cheap, ~1ms total)
-- Main model verifies all 5 in ONE forward pass (same cost as generating 1 token)
-- Accepted tokens: free. Rejected: fall back to normal decode from that point.
-- Acceptance rate: 70-85%. Net speedup: 2-3x. **Same output quality** (mathematically guaranteed).
-
-> "Three more levers, all orthogonal. Let's prove them live."
+Dynamo sits ABOVE vLLM/TRT-LLM. It manages WHICH GPU gets WHICH request based on cached KV state.
+The frontier of agentic inference (2026).
 
 ---
 
-### 🎯 DEMO H: Quantization + Batching (8 min)
-> `demos/demo_i_quantization_batching.ipynb`
-> 1. Real FP16 vs INT8 vs INT4: memory + throughput side by side
-> 2. Real static vs continuous batching: measure padding waste
-> 3. Speculative decoding (vLLM if available, AWS alternative otherwise)
+### Slide 28: Engine Decision Flow
+**Pick based on your workload.**
 
----
+| Use Case | Engine | Why |
+|----------|--------|-----|
+| General production | vLLM | Broadest support, easy setup |
+| Agents + multi-turn | SGLang | RadixAttention, constrained decode |
+| Max throughput (NVIDIA) | TensorRT-LLM | AOT compile, CUDA graphs, FP8 |
+| Agentic session routing | NVIDIA Dynamo | KV-aware load balancing |
+| Prototyping | HuggingFace | Simple, no server |
 
-## PART 5: Engines (12 min)
-
-> **Transition:** "7 optimizations. The good news: engines implement ALL of them for you."
-
-### Slide 27: Three Engines, One Decision
-
-| Engine | Implements | Best For |
-|--------|-----------|----------|
-| **vLLM** | PagedAttention + continuous batching + KV quant | General purpose |
-| **SGLang** | RadixAttention (tree prefix cache) + structured output | Agents, multi-turn |
-| **TensorRT-LLM** | AOT compilation + CUDA graphs + XQA kernels | Max throughput |
-
-> "All three implement everything we discussed. They differ in what they're best at."
-
----
-
-### Slide 28: vLLM Architecture
-**The default choice. One command.**
-
-```mermaid
-flowchart LR
-    subgraph API["API Layer"]
-        R1[Request 1]
-        R2[Request 2]
-        R3[Request 3]
-    end
-    subgraph SCHED["Scheduler"]
-        CB[Continuous<br>Batching]
-    end
-    subgraph MEM["Memory Management"]
-        KV[KV Block Manager<br>PagedAttention]
-        PT[Page Table<br>non-contiguous blocks]
-    end
-    subgraph GPU["GPU Workers"]
-        W1[Worker 1]
-        W2[Worker 2]
-    end
-    R1 --> CB
-    R2 --> CB
-    R3 --> CB
-    CB --> KV
-    KV --> PT
-    PT --> W1
-    PT --> W2
-    style CB fill:#dbeafe,stroke:#000
-    style KV fill:#dcfce7,stroke:#000
-    style PT fill:#dcfce7,stroke:#000
-    style W1 fill:#fef3c7,stroke:#000
-    style W2 fill:#fef3c7,stroke:#000
-```
-
-- Requests arrive asynchronously → scheduler forms dynamic batches
-- KV Block Manager allocates/frees pages as requests start/finish
-- No fragmentation, no padding, continuous insertion of new requests
-- 24x throughput over HuggingFace
-
----
-
-### Slide 29: SGLang Architecture
-**RadixAttention: a tree of cached prefixes.**
-
-```mermaid
-flowchart LR
-    subgraph TREE["Radix Tree Cache"]
-        ROOT["You are a helpful<br>assistant..."] --> BR1["Explain X"]
-        ROOT --> BR2["Summarize Y"]
-        ROOT --> BR3["Translate Z"]
-    end
-    subgraph ENGINE["SGLang Engine"]
-        MATCH[Prefix Matcher<br>longest match lookup]
-        SCHED2[Scheduler<br>+ constrained decoding]
-    end
-    subgraph OUT["Output"]
-        O1[Response 1]
-        O2[Response 2]
-    end
-    BR1 --> MATCH
-    BR2 --> MATCH
-    MATCH --> SCHED2
-    SCHED2 --> O1
-    SCHED2 --> O2
-    style ROOT fill:#dcfce7,stroke:#000
-    style MATCH fill:#dbeafe,stroke:#000
-    style SCHED2 fill:#f3e8ff,stroke:#000
-```
-
-- All requests with shared system prompt share ONE cached prefix (green)
-- New request: find longest matching prefix in tree → skip that prefill
-- 5x cache hit rate over vLLM's hash-based approach
-- Also: constrained decoding for structured output (JSON, regex)
-
-Best for: agents with system prompts, multi-turn conversations, structured output.
-
----
-
-### Slide 30: TensorRT-LLM Architecture
-**Compile once. Run at hardware peak.**
-
-```mermaid
-flowchart LR
-    subgraph BUILD["Build Phase (offline)"]
-        M[Model<br>Checkpoint] --> OPT[Optimizer<br>layer fusion<br>kernel selection]
-        OPT --> ENG[TRT Engine<br>binary]
-    end
-    subgraph RUN["Runtime Phase"]
-        ENG --> CG[CUDA Graphs<br>zero launch overhead]
-        CG --> XQA[XQA Kernels<br>per-architecture]
-        XQA --> FP8[FP8 Compute<br>2x throughput]
-    end
-    style M fill:#f3f4f6,stroke:#000
-    style OPT fill:#fef3c7,stroke:#000
-    style ENG fill:#dcfce7,stroke:#000
-    style CG fill:#dbeafe,stroke:#000
-    style XQA fill:#dbeafe,stroke:#000
-    style FP8 fill:#dbeafe,stroke:#000
-```
-
-- Build: fuses layers, selects optimal kernels for YOUR specific GPU
-- Runtime: CUDA graphs eliminate kernel launch overhead entirely
-- XQA: custom attention kernels per architecture (Hopper, Ada, Ampere)
-- FP8: native on H100/H200, 2x throughput over FP16
-- Tradeoff: compile step (minutes), NVIDIA-only
-
----
-
-### Slide 31: Decision Flow
-
-```mermaid
-flowchart LR
-    Q1{Multi-turn<br>agents?} -->|Yes| SG[SGLang]
-    Q1 -->|No| Q2{Max single-GPU<br>throughput?}
-    Q2 -->|Yes| TRT[TensorRT-LLM]
-    Q2 -->|No| VL[vLLM]
-    style SG fill:#dcfce7,stroke:#000
-    style TRT fill:#fef3c7,stroke:#000
-    style VL fill:#dbeafe,stroke:#000
-```
-
-> "Most teams start with vLLM. Switch to SGLang if you're building agents."
-
----
-
-### 🎯 DEMO G: Engine Benchmark (5 min)
-> `demos/demo_h_engine_comparison.ipynb`
-> Same model, same prompt: HF → vLLM → SGLang. Chart + cost table.
-> End with: "Same hardware. 20x cheaper per token."
+### 🎯 DEMO: Final Comparison Chart
+> Show all results side by side. HF -> vLLM -> +prefix -> +KV quant -> +speculative -> SGLang.
 
 ---
 
 ## CLOSING (10 min)
 
-### Slide 32: Stack Everything
-**Waterfall: baseline to 20x.**
+### Slide 29: The 20x Improvement Stack
 
 | Optimization | Cumulative | Category |
 |---|---|---|
@@ -774,77 +565,16 @@ flowchart LR
 | + INT4 weights (4x less weight memory) | 7x | Model |
 | + PagedAttention (no fragmentation) | 10x | KV Cache |
 | + Prefix caching (shared system prompts) | 13x | KV Cache |
-| + Continuous batching (no padding waste) | 16x | Loop |
-| + Speculative decoding (2-3x decode speed) | 20x | Loop |
+| + Continuous batching (no padding waste) | 16x | Serving |
+| + Speculative decoding (2-3x decode speed) | 20x | Serving |
 
-> "Same GPU. Same model. 20x more capacity."
+Same GPU. Same model. 20x more capacity.
 
----
+### Slide 30: The Decision Framework
+**Model -> Precision -> GPU -> SLO -> KV Strategy -> Engine -> $/M tokens**
 
-### Slide 33: The Decision Framework
-**What you take home.**
+### Slide 31: What is Next (In the Repo)
+**Ch07-11: Multimodal (M*), Kubernetes (KServe, llm-d), Ray Serve, Custom Silicon (Groq, Cerebras)**
 
-```mermaid
-flowchart LR
-    A[Pick Model] --> B[Pick Precision<br>FP16/INT8/INT4]
-    B --> C[Pick GPU<br>A100/H100/H200]
-    C --> D[Set SLO<br>TTFT + ITL]
-    D --> E[Max Batch<br>from equation]
-    E --> F[Pick Engine<br>vLLM/SGLang/TRT]
-    F --> G[Cost per<br>M tokens]
-    style A fill:#f3f4f6,stroke:#000
-    style G fill:#dcfce7,stroke:#000
-```
-
----
-
-### Slide 34: What's Next (In the Repo)
-**Chapters 07-11. Explore on your own.**
-
-- Multimodal serving (Stanford M*, Walk Graphs, VoxServe)
-- Kubernetes (KServe, llm-d, KAI Scheduler)
-- Ray Serve, disaggregated serving (DistServe, Mooncake)
-- Custom silicon (Groq LPU, Cerebras WSE-3)
-
----
-
-### Slide 35: Numbers You Proved Today
-
-| Number | What It Is |
-|--------|-----------|
-| 14.5 GB | Mistral-7B FP16 weight memory |
-| 131 KB | KV cache cost per token |
-| 80x | How far decode sits below compute peak |
-| 4x | GQA savings over MHA |
-| 4x | INT4 weight compression |
-| 15x | Prefix caching TTFT improvement |
-| 2-3x | Speculative decoding speedup |
-| 24x | vLLM throughput over HuggingFace |
-
-> "Every number was computed live. Reproducible in the notebooks."
-
----
-
-### Slide 36: Resources + Q&A
-**Go build.**
-
-- GitHub: `github.com/harshuljain13/llm-inference-at-scale` (QR code)
-- Molab: links for all 8 demo notebooks
-- Book: Manning "LLM Inference in Action" (2027)
-
-> "55+ modules, 12 chapters. Every concept has a lab. Questions?"
-
----
-
-## Narrative Thread Summary
-
-The story in one paragraph:
-
-> We loaded a model and it was slow (Demo A). We learned it's because inference is memory-bound, not compute-bound (Part 1). We saw that attention architecture determines the KV cost per token, and modern models already give us 4x savings for free (Part 2). We discovered 4 techniques to optimize what's stored in the cache: page it, reuse prefixes, evict useless tokens, quantize values (Part 3). We found 3 more levers for the weights and decode loop: quantize weights, batch continuously, and decode speculatively (Part 4). And we saw that production engines implement ALL of this in one package, giving 20x improvement over naive HuggingFace (Part 5).
-
-Each transition answers: "OK, but..." 
-- "OK memory is used. But why is it SLOW?" → bandwidth wall
-- "OK it's slow. But can we reduce what's stored?" → attention optimizations  
-- "OK per-token cost is lower. But can we cache smarter?" → KV engineering
-- "OK cache is optimized. But what about weights and the loop?" → quant + batching + speculative
-- "OK there are 7 techniques. Do I implement them?" → engines do it for you
+### Slide 32: Resources + Q&A
+**GitHub QR code. Molab links. Manning book (2027). 55+ modules, 12 chapters.**
