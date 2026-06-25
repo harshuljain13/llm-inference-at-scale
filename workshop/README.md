@@ -59,8 +59,9 @@ hf download mistralai/Mistral-7B-v0.1
 | `demo_c_prefill_vs_decode.ipynb` | Prefill fast, decode slow, roofline | Molab |
 | `demo_d_capacity_calculator.ipynb` | Max users, GPU selection (widgets) | Molab |
 | `demo_e_attention_comparison.ipynb` | GQA/MLA comparison + INT4/INT8 quantization | Molab |
-| `demo_f_engine_comparison.ipynb` | vLLM: PagedAttention, prefix, KV quant, speculative | Lightning.ai |
-| `demo_g_sglang_prefix.ipynb` | SGLang RadixAttention vs vLLM hash-based prefix | Lightning.ai |
+| `demo_e_quantization_batching.ipynb` | GQA/MLA comparison + INT4/INT8 quantization | Molab |
+| `demo_f_vllm.ipynb` | vLLM: PagedAttention, prefix, KV quant, speculative | Lightning.ai |
+| `demo_g_sglang.ipynb` | SGLang RadixAttention vs vLLM hash-based prefix | Lightning.ai |
 
 ---
 
