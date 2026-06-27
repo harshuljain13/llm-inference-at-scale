@@ -2,7 +2,7 @@
 
 **AI Engineering World's Fair 2026 | June 29 | 2 hours**
 
-By [Harshul Jain](https://github.com/harshuljain13) | [Book repo](https://github.com/harshuljain13/llm-inference-at-scale)
+By [Harshul Jain](https://github.com/harshuljain13) | [Slides](https://drive.google.com/drive/folders/1PZQbo7m94o1-yzMQoCSHEUG6mvXY1fHx?usp=sharing)
 
 ---
 
@@ -14,56 +14,25 @@ git clone https://github.com/harshuljain13/llm-inference-at-scale.git
 cd llm-inference-at-scale/workshop/demos
 ```
 
-### 2. Open notebooks on Molab (GPU, free)
-Go to [molab.marimo.io](https://molab.marimo.io) and fork any notebook:
-- Click "Open from GitHub"
-- Paste: `https://github.com/harshuljain13/llm-inference-at-scale/blob/master/workshop/demos/demo_a_feel_the_pain.ipynb`
-- Select GPU runtime (RTX Pro 6000, 96GB)
-
-Demos A through E run on Molab. No install needed.
-
-### 3. (Optional) Lightning.ai for engine demos
-Demos F and G (vLLM, SGLang) require a Lightning.ai Studio:
-1. Sign up at [lightning.ai](https://lightning.ai)
-2. Create a Studio with **A100 GPU**
-3. Install engines:
-```bash
-pip install vllm openai tqdm matplotlib
-pip install "numpy<2" "scipy>=1.14"
-```
-4. Download model:
-```bash
-hf download mistralai/Mistral-7B-v0.1
-```
-
 ---
 
-## Workshop Structure
-
-| Part | Time | Demos | Platform |
-|------|------|-------|----------|
-| 0: Problem Statement | 15 min | A (feel the pain) | Molab |
-| 1: Foundations | 25 min | B, C, D | Molab |
-| 2: Model Optimizations | 20 min | E (attention + quantization) | Molab |
-| 3: KV Cache + Engines | 45 min | F (vLLM), G (SGLang) | Lightning.ai |
-| Closing | 10 min | 20x waterfall | Slides |
-
----
-
-## Demo Notebooks
+## Demo Notebooks with Workshop links
 
 | Demo | What it proves | Run on |
 |------|---------------|--------|
-| `demo_a_feel_the_pain.ipynb` | Memory, TTFT, queue, KV growth | Molab |
-| `demo_b_memory_equation.ipynb` | Architecture, weights, KV derivation | Molab |
-| `demo_c_prefill_vs_decode.ipynb` | Prefill fast, decode slow, roofline | Molab |
-| `demo_d_capacity_calculator.ipynb` | Max users, GPU selection (widgets) | Molab |
-| `demo_e_attention_comparison.ipynb` | GQA/MLA comparison + INT4/INT8 quantization | Molab |
-| `demo_e_quantization_batching.ipynb` | GQA/MLA comparison + INT4/INT8 quantization | Molab |
-| `demo_f_vllm.ipynb` | vLLM: PagedAttention, prefix, KV quant, speculative | Lightning.ai |
-| `demo_g_sglang.ipynb` | SGLang RadixAttention vs vLLM hash-based prefix | Lightning.ai |
+| `demo_a_feel_the_pain.ipynb` | Memory, TTFT, queue, KV growth | https://molab.marimo.io/notebooks/nb_SFA9x81tKc6p3iPU3EDupz |
+| `demo_b_memory_equation.ipynb` | Architecture, weights, KV derivation | https://molab.marimo.io/notebooks/nb_VzHDamsSpwiy8bUKUNgCFm |
+| `demo_c_prefill_vs_decode.ipynb` | Prefill fast, decode slow, roofline | https://molab.marimo.io/notebooks/nb_zwh3Mx9ws2JextL6FGMxUp |
+| `demo_d_capacity_calculator.ipynb` | Max users, GPU selection (widgets) | https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/workshop/demos/demo_d_capacity_calculator.ipynb |
+| `demo_e_attention_comparison.ipynb` | GQA/MLA comparison | https://molab.marimo.io/notebooks/nb_CjjiEAfj4UCgTGdz19maoC |
+| `demo_e_quantization_batching.ipynb` | INT4/INT8 quantization | https://molab.marimo.io/notebooks/nb_RgEKvqccgCJY5xvPUJeaFm |
+| `demo_f_vllm.ipynb` | vLLM: PagedAttention, prefix, KV quant, speculative | Lightning.ai (offline) |
+| `demo_g_sglang.ipynb` | SGLang RadixAttention vs vLLM hash-based prefix | Lightning.ai (offline) |
+| `vllm_sglang_tensorRT_benchmarks.pdf` | Benchmarks to compare Vllm, SGlang and TensorRT | https://drive.google.com/file/d/1vqpA8U8DFmPoYLqDkzfxfvppQBiu0uCD/view?usp=drive_link |
 
 ---
+
+
 
 ## Requirements
 
@@ -76,11 +45,19 @@ hf download mistralai/Mistral-7B-v0.1
 - Python 3.10+
 - vLLM, openai SDK, matplotlib, tqdm
 
----
+### Open notebooks on Molab (GPU, free)
+Go to [molab.marimo.io](https://molab.marimo.io) and fork any notebook:
+- Click "Open from GitHub"
+- Paste: `https://github.com/harshuljain13/llm-inference-at-scale/blob/master/workshop/demos/demo_a_feel_the_pain.ipynb`
+- Select GPU runtime (RTX Pro 6000, 96GB)
 
-## Slides
+Demos A through E run on Molab. No install needed.
 
-`SLIDES.md` contains the full slide deck with mermaid diagrams, speaker notes, and narrative transitions. Feed to Gamma.app or Google Slides for presentation.
+### 3. (Optional) Lightning.ai for engine demos
+Demos F and G (vLLM, SGLang) require a Lightning.ai Studio:
+1. Sign up at [lightning.ai](https://lightning.ai)
+2. Create a Studio with **A100 GPU**
+3. Follow Notebooks
 
 ---
 
