@@ -21,7 +21,7 @@ cd llm-inference-at-scale/workshop/demos
 | Demo | What it proves | Run on |
 |------|---------------|--------|
 | `demo_a_feel_the_pain.ipynb` | Memory, TTFT, queue, KV growth | https://molab.marimo.io/notebooks/nb_SFA9x81tKc6p3iPU3EDupz |
-| `demo_b_memory_equation.ipynb` | Architecture, weights, KV derivation | https://molab.marimo.io/notebooks/nb_VzHDamsSpwiy8bUKUNgCFm |
+| `demo_b_memory_equation.ipynb` | Architecture, weights, KV derivation | https://molab.marimo.io/notebooks/nb_RLJnBYWT7oPzRBVQkvKUVL |
 | `demo_c_prefill_vs_decode.ipynb` | Prefill fast, decode slow, roofline | https://molab.marimo.io/notebooks/nb_zwh3Mx9ws2JextL6FGMxUp |
 | `demo_d_capacity_calculator.ipynb` | Max users, GPU selection (widgets) | https://colab.research.google.com/github/harshuljain13/llm-inference-at-scale/blob/master/workshop/demos/demo_d_capacity_calculator.ipynb |
 | `demo_e_attention_comparison.ipynb` | GQA/MLA comparison | https://molab.marimo.io/notebooks/nb_CjjiEAfj4UCgTGdz19maoC |
