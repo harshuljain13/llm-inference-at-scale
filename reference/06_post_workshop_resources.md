@@ -169,6 +169,7 @@ locust -f locustfile.py --host http://localhost:8000
 ### Newsletters
 
 - **The Batch** (deeplearning.ai) - Weekly AI news
+- **[AI Weekly](https://aiweekly.co/)** - Discover what AI experts are reading and sharing right now
 - **Import AI** - Research summaries
 - **Last Week in AI** - Comprehensive roundup
 
