@@ -1,77 +1,92 @@
 # LLM Inference at Scale: Workshop — ODSC 2026
 
-**Status:** in preparation. Duration and final outline TBD.
+By [Harshul Jain](https://github.com/harshuljain13) |
+[Slides](https://drive.google.com/drive/folders/1j7GYjcLetHQjrRp9dhnS5wiLOT3dtz7A?usp=sharing)
 
-By [Harshul Jain](https://github.com/harshuljain13)
+**Status:** in preparation. Duration and final running order TBD.
 
 ---
 
-## Scope so far
+## Quick start
 
-One topic is committed: **prefill vs. decode** — an LLM call is two different
-workloads glued together, a compute-bound prefill and a memory-bound decode, and
-that asymmetry explains the rest of the stack.
+```bash
+git clone https://github.com/harshuljain13/llm-inference-at-scale.git
+cd llm-inference-at-scale/workshop/odsc-2026/demos
+```
 
-Two existing notebooks cover it from different angles. Both are copied into
-[`demos/`](demos/) **to be combined into a single ODSC notebook** — they are not
-both meant to ship.
+Demo A auto-detects your hardware: a CUDA GPU with ≥ 18 GB VRAM runs the 7B
+path, anything smaller (or CPU-only) falls back to a 1.1B model with smaller
+knobs. The story is identical either way; the absolute numbers are not.
 
-| Notebook | Source | Hardware | Covers |
-|----------|--------|----------|--------|
-| [`demos/demo_c_prefill_vs_decode.ipynb`](demos/demo_c_prefill_vs_decode.ipynb) | `../aiewf-2026/demos/` | **CUDA required**, Mistral-7B fp16 | Prefill sweep 128→8192 tokens; per-step decode timing; roofline plot |
-| [`demos/module1_prefill_vs_decode.ipynb`](demos/module1_prefill_vs_decode.ipynb) | [`llm-inference-experiments`](https://github.com/harshuljain13/llm-inference-experiments/tree/main/module1-prefill-vs-decode) @ `aeb6bdb` | CPU / MPS / CUDA auto-detect, GPT-2 / TinyLlama | Timed prefill+decode; **with vs. without KV cache**; PyTorch profiler; **OpenAI input-vs-output cost mapping**; results table; HTML/PDF export; reflection |
+## Demos
 
-Outputs and the orphaned `metadata.widgets` blob were stripped from
-`module1_prefill_vs_decode.ipynb`; the version with a recorded run lives in the
-source repo. Its companion write-up is
-[`module1-prefill-vs-decode/overview.md`](https://github.com/harshuljain13/llm-inference-experiments/blob/main/module1-prefill-vs-decode/overview.md).
+| Demo | The question it answers | Hardware |
+|------|------------------------|----------|
+| [`demo_a_model_memory_prefill_decode.ipynb`](demos/demo_a_model_memory_prefill_decode.ipynb) | Download a model → where its memory goes → why a long prompt is slower → prefill vs. decode → the bandwidth floor → the KV cache | GPU preferred, CPU fallback |
+| [`demo_b_memory_equation.ipynb`](demos/demo_b_memory_equation.ipynb) | The memory equation from `config.json`: weights vs. KV, scaled across users × context | Any (config math, no model load) |
+| [`demo_e_quantization_batching.ipynb`](demos/demo_e_quantization_batching.ipynb) | FP16 vs. INT8 vs. INT4: memory, throughput, implied max users | CUDA + bitsandbytes |
 
-## Combining the two
+### Demo A is the spine
 
-What each one uniquely contributes:
+It replaces AIEWF's `demo_a` + `demo_b` + `demo_c` and the prefill/decode work
+from
+[`llm-inference-experiments/module1`](https://github.com/harshuljain13/llm-inference-experiments/tree/main/module1-prefill-vs-decode),
+told as one continuous measurement session:
 
-- **Keep from `demo_c`:** the prefill length sweep (the parallel-scaling point
-  needs more than one prompt length) and the roofline plot (the clearest "decode
-  cannot use the compute you paid for" visual).
-- **Keep from `module1`:** device auto-detect, the with/without-KV-cache
-  comparison, and the cost section — API providers charging 3–5× more for output
-  tokens is a direct readout of the hardware asymmetry, and it lands with any
-  audience.
+| § | Section | What gets measured |
+|---|---------|--------------------|
+| 1 | What did we just download? | Load time, on-disk cache size, parameter count, architecture from `config.json` |
+| 2 | Where does the memory go? | Every parameter tensor bucketed by component; allocator view vs. tensor sum; GPU headroom |
+| 3 | First inference | TTFT and total latency, short prompt vs. long prompt |
+| 4 | Splitting the clock | Prefill (one parallel pass) vs. decode (one pass per token), both prompts, plus a prompt-length sweep |
+| 5 | Why can't decode go faster? | Achievable HBM bandwidth, measured on the spot, vs. the measured per-token latency |
+| 6 | The KV cache | Decode with `past_key_values` vs. `use_cache=False`; real cache weighed against the §2 prediction |
 
-Decisions to make before merging:
+Ground rules it follows, and that any new demo should too:
 
-1. **Hardware floor.** `demo_c` hard-requires an A100-class GPU and a gated
-   7B model; `module1` runs on a laptop. Pick one target, or make the sweep
-   degrade to GPT-2 so nobody is blocked at minute five.
-2. **Reconcile the numbers.** `demo_c` hardcodes A100 specs (312 TFLOPS,
-   2 TB/s, "reads 14.5 GB per step") in prose and in the roofline. On any other
-   GPU the narration is wrong. Derive these from the loaded model and
-   `torch.cuda.get_device_properties` instead of asserting them.
-3. **Trim the course scaffolding.** `module1`'s reflection, report export, and
-   results-table-across-sessions sections serve a multi-week class, not a
-   conference slot.
-4. **Scale to the slot.** 11 cells vs. 40; the merged notebook needs a stated
-   time budget before it can be cut to fit.
+- **No simulation.** Every figure is a timed run on the machine executing the
+  notebook. Where a value is *predicted* from `config.json` (KV bytes per token),
+  it is labelled a prediction in §2 and then checked against the real cache in §6.
+- **No hardcoded GPU specs.** Bandwidth is measured with a device-to-device copy
+  benchmark rather than quoting a spec sheet, so the narration stays true on
+  whatever GPU is in the room.
+- **Prefill and decode are driven by hand**, not via `generate()` — that is the
+  only way to time the two phases separately.
+- Tables for numbers, charts for shape, and headings that state the question.
 
-Known defects to fix while merging, not inherit:
+## Still to decide
 
-- `demo_c` cell 1 computes `gpu_bw_tbs` from `total_memory` — that is capacity,
-  not bandwidth, and the variable is never used.
-- `demo_c`'s roofline cell builds `roofline_vals` and then discards it in favour
-  of `roof_perf`.
-- `demo_c` Experiment 2 re-runs a **full forward pass over the whole sequence**
-  each step with no KV cache, so its "decode latency" grows with sequence length
-  and overstates per-token cost. `module1`'s cached decode path is the correct
-  measurement — and `demo_c`'s own summary claim ("~constant per token") is what
-  the uncached loop fails to show.
+1. **Running order and time budget** once the slot length is confirmed.
+2. **Whether the throughput-ceiling story returns.** AIEWF's `demo_a` ended with
+   5 sequential requests and a queue visualization — the setup for batching. It
+   is *not* in the merged Demo A. It is still in
+   [`../aiewf-2026/demos/demo_a_feel_the_pain.ipynb`](../aiewf-2026/demos/demo_a_feel_the_pain.ipynb)
+   if ODSC wants it, probably as its own demo alongside batching.
+3. **Molab/Colab hosted copies.** The badge links in these notebooks resolve
+   against `master` once merged; the `molab.marimo.io/notebooks/nb_...` links in
+   the AIEWF README are hosted forks of the *AIEWF* notebooks and need
+   re-forking for ODSC.
+4. **Attention variants and engines** — `demo_e_attention_comparison`,
+   `demo_d_capacity_calculator`, `demo_f_vllm`, `demo_g_sglang` are still only in
+   `../aiewf-2026/`. Copy (don't move) any that make the cut, and repoint their
+   badge paths to `workshop/odsc-2026/demos/...`.
 
-## Carry-over candidates (not yet copied)
+## Superseded sources (safe to delete after a verified run)
 
-From [`../aiewf-2026/`](../aiewf-2026/): `demo_a_feel_the_pain`,
-`demo_b_memory_equation`, `demo_d_capacity_calculator`,
-`demo_e_attention_comparison`, `demo_e_quantization_batching`, `demo_f_vllm`,
-`demo_g_sglang`. Copy (don't move) any of these in, and update their Colab/Molab
-badge paths to `workshop/odsc-2026/demos/...`.
+These two are the inputs that were merged into Demo A. They are kept only until
+Demo A has been run end to end on real hardware:
+
+- `demos/demo_c_prefill_vs_decode.ipynb` — AIEWF original. **Its decode
+  measurement is wrong:** the loop re-forwards the whole sequence every step with
+  no KV cache, so its "decode latency" grows with sequence length, contradicting
+  the notebook's own "~constant per token" summary. Demo A §4 fixes this by
+  feeding back `past_key_values`, and §6 keeps the uncached loop deliberately —
+  as the *contrast*, which is the only thing it is good for.
+- `demos/module1_prefill_vs_decode.ipynb` — course notebook with the correct
+  cached decode path, the profiler section, and the OpenAI input-vs-output cost
+  mapping. **The cost section did not make it into Demo A** and is worth adding
+  back: API pricing charging 3–5× more for output tokens is the business-facing
+  readout of the hardware asymmetry §4 measures.
 
 ---
 
