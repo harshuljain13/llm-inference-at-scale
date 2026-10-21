@@ -26,13 +26,13 @@ student's downloads folder is still identifiable as ODSC material.
 
 | Demo | The question | Hardware |
 |------|--------------|----------|
-| [`odsc_2026_demo_a_model_memory_prefill_decode.ipynb`](demos/odsc_2026_demo_a_model_memory_prefill_decode.ipynb) | Why is serving an LLM hard? Download → memory → latency → prefill vs decode (with and without KV cache) → the bandwidth floor | GPU preferred, CPU fallback |
+| [`odsc_2026_demo_a_model_memory_prefill_decode.ipynb`](demos/odsc_2026_demo_a_model_memory_prefill_decode.ipynb) | Why is serving an LLM hard? Download → memory → latency → prefill vs decode (with and without KV cache) → the bandwidth floor → the API bill | GPU preferred, CPU fallback |
 | [`odsc_2026_demo_b_attention_and_quantization.ipynb`](demos/odsc_2026_demo_b_attention_and_quantization.ipynb) | Given that floor, how do you lower it? Shrink the KV cache (GQA/MQA/MLA) and shrink the weights (INT8/INT4) — and how many users each buys | §2–4 any device; §5 needs CUDA + bitsandbytes |
 
 **A establishes the bottleneck; B attacks it.** That is the arc, and B's opening
 paragraph picks up A's closing number deliberately.
 
-### Demo A is one argument, not six topics
+### Demo A is one argument, not seven topics
 
 Each section exists because the previous one raised a question:
 
@@ -43,7 +43,8 @@ Each section exists because the previous one raised a question:
 | 3 | TTFT and total, short vs long prompt | Where inside that wait did the time go? |
 | 4 | **2 prompts × 2 cache settings = 4 runs**, prefill and decode timed separately | Decode is flat but slow. What is it waiting on? |
 | 5 | This GPU's bandwidth (measured), vs measured per-token latency | So what does that cache weigh? |
-| 6 | Real cache weighed; §2's prediction settled | Floor = (weights + KV) / bandwidth → Demo B |
+| 6 | Real cache weighed; §2's prediction settled | What does this cost in money, not milliseconds? |
+| 7 | Providers' output:input price ratio vs **our measured** time ratio | Floor = (weights + KV) / bandwidth → Demo B |
 
 §4 is the hinge, and it runs the full grid on purpose. The two-dimensional
 comparison shows something neither axis alone does:
@@ -107,23 +108,23 @@ and ran no benchmark.** It was arithmetic over hardcoded constants with
   "~constant per token" summary. In A §4 that uncached loop is still run — but
   deliberately, as the *contrast*, which is the only thing it was ever good for.
 - `demo_e_quantization_batching.ipynb` — merged into Demo B §5.
+- `module1_prefill_vs_decode.ipynb` — its experiments now live in Demo A: the
+  cached/uncached prefill-decode behaviour in §4, token counts and latency in
+  §3–4, and its **cost mapping** as the new §7. Deliberately *not* carried over:
+  the PyTorch profiler section, the reflection prompts, and the HTML/PDF report
+  export — course scaffolding for a multi-week class, not a conference slot.
 
 All three originals remain in [`../aiewf-2026/demos/`](../aiewf-2026/demos/).
-
-## Still here, still undecided
-
-- `demos/module1_prefill_vs_decode.ipynb` — the course notebook, kept for one
-  reason: its **OpenAI input-vs-output cost mapping** did not make it into Demo A,
-  and API pricing charging 3–5× more for output tokens is the business-facing
-  readout of the asymmetry A §4 measures. Either fold that section into A §7 or
-  delete this file; it should not stay as a loose third notebook.
 
 ## Still to decide
 
 1. **Running order and time budget** once the slot length is confirmed.
-2. **Batching is the missing lever.** A shows one weight read per token for one
-   user; B shrinks that read. Neither shows amortizing a single read across many
-   users' tokens — which is what the engines actually do, and the natural Demo C.
+2. **Batching is the missing lever — and A §7 now proves it quantitatively.**
+   Our measured single-stream output:input *time* ratio comes out ~100x or more,
+   while providers charge only ~4–5x. That gap is batching: a real server's one
+   weight read produces a token for every user in the batch, not just one. A §7
+   names this and points at it; nothing in A or B measures it. This is the
+   strongest case for a Demo C.
 3. **Whether the throughput-ceiling story returns.** AIEWF's `demo_a` ended with
    5 sequential requests and a queue visualization — the setup for batching.
    Still in [`../aiewf-2026/demos/demo_a_feel_the_pain.ipynb`](../aiewf-2026/demos/demo_a_feel_the_pain.ipynb).
