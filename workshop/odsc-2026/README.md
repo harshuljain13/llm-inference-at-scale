@@ -23,8 +23,9 @@ knobs. The story is identical either way; the absolute numbers are not.
 | Demo | The question it answers | Hardware |
 |------|------------------------|----------|
 | [`demo_a_model_memory_prefill_decode.ipynb`](demos/demo_a_model_memory_prefill_decode.ipynb) | Download a model → where its memory goes → why a long prompt is slower → prefill vs. decode → the bandwidth floor → the KV cache | GPU preferred, CPU fallback |
-| [`demo_b_memory_equation.ipynb`](demos/demo_b_memory_equation.ipynb) | The memory equation from `config.json`: weights vs. KV, scaled across users × context | Any (config math, no model load) |
-| [`demo_e_quantization_batching.ipynb`](demos/demo_e_quantization_batching.ipynb) | FP16 vs. INT8 vs. INT4: memory, throughput, implied max users | CUDA + bitsandbytes |
+| [`demo_e_attention_and_quantization.ipynb`](demos/demo_e_attention_and_quantization.ipynb) | The two ways to lower that floor: shrink the KV cache (GQA/MQA/MLA) and shrink the weights (INT8/INT4) — then how many users each buys | §2–4 any device; §5 needs CUDA + bitsandbytes |
+
+Demo A establishes the bottleneck; Demo E attacks it. That is the whole arc so far.
 
 ### Demo A is the spine
 
@@ -41,6 +42,36 @@ told as one continuous measurement session:
 | 4 | Splitting the clock | Prefill (one parallel pass) vs. decode (one pass per token), both prompts, plus a prompt-length sweep |
 | 5 | Why can't decode go faster? | Achievable HBM bandwidth, measured on the spot, vs. the measured per-token latency |
 | 6 | The KV cache | Decode with `past_key_values` vs. `use_cache=False`; real cache weighed against the §2 prediction |
+
+### Demo E merges both AIEWF "demo E" notebooks
+
+AIEWF had two files sharing the `demo_e` prefix — one workshop slot, two levers. They
+are now one notebook, because they answer the same question (how do you read fewer
+bytes per token?) from opposite ends:
+
+| § | Section | What gets measured |
+|---|---------|--------------------|
+| 2 | Controlled: MHA vs GQA-4 vs GQA-2 vs MQA | Four identical Llama models, only `num_key_value_heads` differs, randomly initialized — real prefill, real cache weighed, real decode timing |
+| 3 | Real checkpoints | GPT-2 (MHA) vs TinyLlama (GQA): measured cache, then checked against the config formula |
+| 4 | MLA | **Derived from DeepSeek-V2's published config, not measured** — and labelled so, with the 56x-vs-14x baseline caveat kept |
+| 5 | Quantization | Same checkpoint at FP16 / INT8 / INT4: measured weight memory, throughput, ms/token |
+| 6 | Both levers together | Capacity from measured VRAM + measured weights + the §3-validated KV formula |
+
+Rebuilding the attention half was necessary, not cosmetic. The AIEWF original claimed
+in its own header to "benchmark MHA vs GQA vs MLA vs FlashAttention on a real GPU" and
+to "load Mistral-7B and measure actual memory and latency" — **it loaded no model and
+ran no benchmark.** It was arithmetic over hardcoded constants with `gpu_bw_gbs = 2039`
+(an A100 figure) baked in. §2 now does the experiment the old header promised, and does
+it *controlled*, which the original could not have done even in principle by comparing
+published configs.
+
+Two other inherited defects, fixed:
+
+- The quantization half promised perplexity in prose ("to show it barely changes") and
+  never computed it. Demo E now says plainly that it measures **no** quality cost, and
+  that INT4 capacity gains shouldn't be quoted without one.
+- Its max-users arithmetic hardcoded an 80 GB GPU and 131 KB/token. §6 reads VRAM from
+  the device and weights from §5.
 
 Ground rules it follows, and that any new demo should too:
 
@@ -66,10 +97,24 @@ Ground rules it follows, and that any new demo should too:
    against `master` once merged; the `molab.marimo.io/notebooks/nb_...` links in
    the AIEWF README are hosted forks of the *AIEWF* notebooks and need
    re-forking for ODSC.
-4. **Attention variants and engines** — `demo_e_attention_comparison`,
-   `demo_d_capacity_calculator`, `demo_f_vllm`, `demo_g_sglang` are still only in
-   `../aiewf-2026/`. Copy (don't move) any that make the cut, and repoint their
-   badge paths to `workshop/odsc-2026/demos/...`.
+4. **Engines** — `demo_f_vllm` and `demo_g_sglang` are still only in
+   `../aiewf-2026/`, as is `demo_d_capacity_calculator` (whose interactive
+   capacity widgets now overlap Demo E §6). Copy (don't move) any that make the
+   cut, and repoint their badge paths to `workshop/odsc-2026/demos/...`.
+5. **Batching** is the obvious missing lever. Demo A shows one weight read per
+   token for one user; Demo E shrinks that read. Neither shows amortizing a
+   single read across many users' tokens — which is the thing the engines
+   actually do and the natural Demo F.
+
+## Deleted from this folder
+
+- `demo_b_memory_equation.ipynb` — fully absorbed. Its memory equation is Demo A
+  §2 (now *measured*, with the config formula as a labelled prediction that §6
+  checks), and its users × context scaling chart is Demo E §6, built from
+  measured inputs instead of assumed ones.
+- `demo_e_quantization_batching.ipynb` — merged into
+  `demo_e_attention_and_quantization.ipynb` §5. Both originals remain in
+  `../aiewf-2026/demos/`.
 
 ## Superseded sources (safe to delete after a verified run)
 
