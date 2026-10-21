@@ -1,4 +1,4 @@
-# LLM Inference at Scale: Workshop — ODSC 2026
+# Serving LLMs Efficiently at Scale: Workshop — ODSC 2026
 
 By [Harshul Jain](https://github.com/harshuljain13) |
 [Slides](https://drive.google.com/drive/folders/1j7GYjcLetHQjrRp9dhnS5wiLOT3dtz7A?usp=sharing)
