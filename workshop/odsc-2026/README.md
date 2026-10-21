@@ -32,33 +32,62 @@ student's downloads folder is still identifiable as ODSC material.
 **A establishes the bottleneck; B attacks it.** That is the arc, and B's opening
 paragraph picks up A's closing number deliberately.
 
-### Demo A is one argument, not seven topics
+### Demo A is one argument, not nine topics
 
 Each section exists because the previous one raised a question:
 
 | § | Measures | Which raises |
 |---|----------|--------------|
-| 1 | Load time, params, **weights in GB** | What else needs memory, and how much is left? |
-| 2 | Every tensor bucketed; allocator vs sum; free VRAM; KV bytes/token *predicted* | Fine — but what does a user experience? |
-| 3 | TTFT and total, short vs long prompt | Where inside that wait did the time go? |
-| 4 | **2 prompts × 2 cache settings = 4 runs**, prefill and decode timed separately | Decode is flat but slow. What is it waiting on? |
-| 5 | This GPU's bandwidth (measured), vs measured per-token latency | So what does that cache weigh? |
-| 6 | Real cache weighed; §2's prediction settled | What does this cost in money, not milliseconds? |
-| 7 | Providers' output:input price ratio vs **our measured** time ratio | Floor = (weights + KV) / bandwidth → Demo B |
+| 1 | Load time, params, **weights in GB** | What else needs memory? |
+| 2 | Every tensor bucketed; free VRAM; KV bytes/token *predicted* | What does a user experience? |
+| 3 | **TTFT across 5 short + 4 long prompts**, median of N with range | Where did that latency go? |
+| 4 | Prefill vs decode for all 9 prompts | Can we skip prefill? |
+| 5 | **Similar (shared-prefix) vs dissimilar long prompts**, length-matched | Why is decode flat? |
+| 6 | Cached vs uncached decode, over enough steps for O(n) to show | Flat but slow — waiting on what? |
+| 7 | This GPU's bandwidth (measured) vs measured per-token latency | What does the cache weigh? |
+| 8 | Real caches weighed; §2's prediction settled | What does it cost in money? |
+| 9 | Providers' output:input price ratio vs **our measured** time ratio | Floor → Demo B |
 
-§4 is the hinge, and it runs the full grid on purpose. The two-dimensional
-comparison shows something neither axis alone does:
+### Benchmark discipline, enforced in code
 
-- **Prefill is identical with and without the cache** — it processes the prompt
-  in one parallel pass either way; the only difference is whether K and V are
-  *kept*. So the cache is a decode optimization, not a prompt one.
-- **Decode lives or dies by it**, and the long prompt is hit far harder, because
-  every uncached step re-forwards its entire context.
-- **Cached per-step times are flat; uncached ones climb.** The table prints
-  `First step` and `Last step` side by side so this is visible as numbers, not
-  only as a chart shape.
-- **Even cached, decode is far slower per token than prefill** — which is what
-  sends you into §5.
+An earlier draft produced numbers that looked broken — a short prompt showing *no*
+KV-cache benefit, and an uncached long prompt whose per-step cost appeared to
+*shrink*. The measurements were right; the experiment was wrong. n=1 per class,
+no repeats, and a growth test run over a range where the sequence grew 0.3%.
+
+The `repeat()` harness in §0 now enforces three rules, and every table carries `n`
+and a low–high range so the noise is visible:
+
+1. **Synchronize** around every timed region — otherwise you time a launch queue.
+2. **Warm up** first — the first call compiles kernels and allocates peaks.
+3. **Repeat, report the median with its range** — one sample is an anecdote.
+
+Design consequences worth keeping:
+
+- **Nine prompts, not two.** Short prompts are dominated by fixed per-call
+  overhead, which is why a 9-token prompt measures ~400 tok/s of "prefill" and a
+  4096-token one measures ~14,000. The `ms per input token` column makes that
+  visible instead of mysterious.
+- **§6 starts from a short prompt** and decodes 64 steps, so the sequence
+  multiplies several times and O(n) growth is actually detectable. The notebook
+  states plainly why the same test on a 4096-token prompt shows nothing.
+
+### §5: the experiment that replaced the cache on/off toggle
+
+Real traffic shares prefixes — RAG resends the same document, agents replay the
+same system prompt, chatbots resend the conversation. So §5 measures two families
+at **matched total input length**:
+
+| Family | Construction | Reuse available? |
+|--------|--------------|------------------|
+| similar | one shared prefix + a different short suffix per request | yes — prefix K/V computed once |
+| dissimilar | a different source text per request, same total length | no — every token is new |
+
+Identical length, identical model; the only variable is prefix sharing. The
+conclusion is one most capacity planning misses: **TTFT depends on your traffic
+pattern, and routing is part of your latency budget** — round-robin throws away a
+warm prefix. This is the mechanism behind vLLM prefix caching and SGLang's
+RadixAttention.
 
 ### Conventions these two establish
 
