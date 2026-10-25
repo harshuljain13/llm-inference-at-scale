@@ -28,26 +28,15 @@ appears in both places, one of them is already wrong.
 
 ## Before you start
 
-Setup for these modules is **not** described here. Two files own it, and both are
-upstream of this one:
+Setup is not described here — **read [`../SETUP.md`](../SETUP.md) first.** It is
+the pre-session gate: it carries the two RunPod facts that will otherwise cost you
+the session, and the order the steps have to happen in. Where every other
+instruction lives is mapped in [Where each thing lives](#where-each-thing-lives)
+at the bottom.
 
-| | Owns |
-|---|---|
-| [`../SETUP.md`](../SETUP.md) | The pre-session gate — what each half of the workshop needs, and the two RunPod facts that will cost you the session if you get them wrong |
-| [Dodona `PREREQUISITES.md`](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md) | Every actual step: `.env`, keys, the SSH key, the box, and a check that tells you whether you are ready |
-
-Read `../SETUP.md` first. The short version of why: it takes about twenty
-minutes, most of it waiting for accounts, it needs a GPU box that **bills by the
-hour**, and the HuggingFace token from modules 1–2 gets reused — so the ordering
-matters.
-
-**Do not bring the cluster up before the session.** That is the first thing we do
-together, it takes fifteen to twenty minutes, and the meter is running.
-
-**You can follow modules 3 and 4 without any of this.** See
-[If you are not building the cluster](#if-you-are-not-building-the-cluster) at the
-bottom — the measurements are committed to the repo, so the argument survives
-without the hardware.
+**You can follow modules 3 and 4 without any of it.** See
+[If you are not building the cluster](#if-you-are-not-building-the-cluster) — the
+measurements are committed, so the argument survives without the hardware.
 
 ---
 
@@ -197,7 +186,8 @@ during it.
 
 | | Owned by |
 |---|---|
-| Why modules 3–4 exist, what they cost, live-vs-recorded | **this file** |
+| Why modules 3–4 exist, what you will see, live-vs-recorded | **this file** |
+| The pre-session gate: which half needs what, and the RunPod facts | [`../SETUP.md`](../SETUP.md) |
 | Setup, keys, accounts, the GPU box | [Dodona `PREREQUISITES.md`](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md) |
 | Architecture, services, `make` targets | [Dodona `README.md`](https://github.com/harshuljain13/Dodona/blob/main/README.md) |
 | Load generators, run comparability, SLOs | [Dodona `benchmarking/`](https://github.com/harshuljain13/Dodona/blob/main/benchmarking/README.md) |
