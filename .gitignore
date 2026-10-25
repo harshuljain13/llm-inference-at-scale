@@ -1,5 +1,6 @@
 # Kiro
 .kiro/
+.spec-dev/
 
 # Python
 __pycache__/
@@ -47,3 +48,4 @@ logs/
 *.pt
 *.pth
 models/
+
