@@ -14,7 +14,7 @@ git clone https://github.com/harshuljain13/llm-inference-at-scale.git
 cd llm-inference-at-scale/workshop/odsc-2026/demos
 ```
 
-**Both demos detect hardware, because Demo A runs on Molab.** A CUDA GPU with
+**Both notebooks detect hardware, because Module 1 runs on Molab.** A CUDA GPU with
 ≥ 18 GB VRAM takes the Mistral-7B path; anything smaller — including CPU-only —
 falls back to TinyLlama-1.1B with smaller knobs, and every prompt length, decode
 step count and precision follows from that one switch. Same shapes, different
@@ -29,25 +29,45 @@ absolute numbers. Two consequences worth knowing before you present:
   `ASSUMED: ...` through every table and chart that consumes it.
 
 Mistral-7B is gated, so on the 7B path cell 00 checks `whoami()` and tells you to
-log in rather than failing part-way into a download. Demo B §5 (quantization) is
+log in rather than failing part-way into a download. Module 2 §5 (quantization) is
 the one part that genuinely requires bitsandbytes.
 
-## Demos
+## Modules
 
 Every file is prefixed `odsc_2026_` so a notebook pulled into Colab, Molab, or a
 student's downloads folder is still identifiable as ODSC material.
 
-| Demo | The question | Hardware |
-|------|--------------|----------|
-| [`odsc_2026_demo_a_model_memory_prefill_decode.ipynb`](demos/odsc_2026_demo_a_model_memory_prefill_decode.ipynb) | Why is serving an LLM hard? Model shape → memory → TTFT → ITL → prompt length → **how the KV cache grows** → how many users fit | Molab, Colab, or any CUDA GPU; CPU fallback |
-| [`odsc_2026_demo_b_attention_and_quantization.ipynb`](demos/odsc_2026_demo_b_attention_and_quantization.ipynb) | Given that floor, how do you lower it? Shrink the KV cache (GQA/MQA/MLA) and shrink the weights (INT8/INT4) — and how many users each buys | §2–4 any device; §5 needs CUDA + bitsandbytes |
+| Module | The question | Hardware |
+|--------|--------------|----------|
+| 1 · [`odsc_2026_module1_memory_and_latency.ipynb`](demos/odsc_2026_module1_memory_and_latency.ipynb) | Why is serving an LLM hard? Model shape → memory → TTFT → ITL → prompt length → **how the KV cache grows** → how many users fit | Molab, Colab, or any CUDA GPU; CPU fallback |
+| 2 · [`odsc_2026_module2_attention_and_quantization.ipynb`](demos/odsc_2026_module2_attention_and_quantization.ipynb) | Given that floor, how do you lower it? Shrink the KV cache (GQA/MQA/MLA) and shrink the weights (INT8/INT4) — and how many users each buys | §2–4 any device; §5 needs CUDA + bitsandbytes |
+| 3 & 4 · [`odsc_2026_module3_and_4_dodona_cluster.md`](demos/odsc_2026_module3_and_4_dodona_cluster.md) | **Markdown, not a notebook.** Run it for real: prefill/decode split across one sliced card, then **admission control** — when the card is full, who gets turned away, and did anyone decide? | A rented GPU box + ~20 min of setup, **or** read the committed reports |
 
-**A establishes the bottleneck; B attacks it.** That is the arc, and B's opening
-paragraph picks up A's closing number deliberately.
+**1 establishes the bottleneck, 2 attacks it, 3 builds it for real, 4 decides who
+gets turned away.** That is the arc, and each one's opening picks up the previous
+one's closing number deliberately.
 
-### Demo A is a presentation, not a reader
+Modules 3 and 4 are a markdown file because they do not fit in a notebook — they
+need a scheduler, a control plane, a metrics stack, and load arriving from
+somewhere other than the cell above. That cluster is a separate public repo,
+**[Dodona](https://github.com/harshuljain13/Dodona)**, and the markdown file links
+to it rather than restating it:
 
-Demo A is the version you *run on stage*. It merges AIEWF's
+- **Setup instructions are never copied here.** Dodona's
+  [`PREREQUISITES.md`](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md)
+  is the single source of truth. Duplicated setup steps fail silently and late —
+  six months from now, for someone who then concludes the workshop is broken.
+- **Links are absolute, not relative.** Different repo, and modules 1–2 get opened
+  standalone in Colab/Molab where relative paths resolve to nothing.
+- **Links currently track Dodona's `main`.** To freeze them for a delivery, tag
+  Dodona `odsc-2026` and swap `blob/main` → `blob/odsc-2026` in that one file.
+- **There is a no-GPU path.** Dodona commits its benchmark reports and Grafana
+  screenshots, so modules 3–4 can be presented cold. A live cluster at a
+  conference is a coin flip; decide live-vs-recorded before the session.
+
+### Module 1 is a presentation, not a reader
+
+Module 1 is the version you *run on stage*. It merges AIEWF's
 [`demo_b_memory_equation`](../aiewf-2026/demos/demo_b_memory_equation.ipynb) and
 [`demo_c_prefill_vs_decode`](../aiewf-2026/demos/demo_c_prefill_vs_decode.ipynb)
 under a single constraint: **one markdown header, one short code cell, one printed
@@ -73,7 +93,7 @@ more prompt moves TTFT a lot and ITL almost nothing, so prefill and decode are t
 bottlenecks and you can never quote one average. §06 then shows the KV cache
 growing in both directions — **linear in context, measured; linear in users,
 arithmetic** — and §07 lands on a number that does not fit, which is the handoff
-to Demo B.
+to Module 2.
 
 `§06a` is the one to not cut for time. It is the only place in either notebook
 where a prediction and a measurement are drawn on the same axes and coincide, and
@@ -106,11 +126,11 @@ Three things it deliberately does **not** do, all of which the previous draft di
 - **Synchronize and warm up, always.** `timed()` calls
   `torch.cuda.synchronize()` on both sides, and every shape is run once before it
   is measured. Skip either and you are timing a launch queue or a kernel compile.
-- **Derived numbers are labelled derived.** Demo B §4 (MLA) is arithmetic from
+- **Derived numbers are labelled derived.** Module 2 §4 (MLA) is arithmetic from
   DeepSeek-V2's published config and says so in the output, the chart, and the
   prose.
 
-### Demo B merges both AIEWF "demo E" notebooks
+### Module 2 merges both AIEWF "demo E" notebooks
 
 AIEWF had two files sharing the `demo_e` prefix — one slot, two levers:
 
@@ -130,18 +150,18 @@ and ran no benchmark.** It was arithmetic over hardcoded constants with
 
 ## Deleted from this folder
 
-- `demo_b_memory_equation.ipynb` — absorbed, and extended. Its equation is A §06
+- `demo_b_memory_equation.ipynb` — absorbed, and extended. Its equation is Module 1 §06
   with the formula now checked against the real cache; its users × context chart
   is A §06b and §07, built from the detected budget instead of a hardcoded
-  `57.5`. What the original never did — and A §06a now does — is *weigh* the
+  `57.5`. What the original never did — and Module 1 §06a now does — is *weigh* the
   cache at a range of context lengths to show the growth is linear rather than
   asserting it.
-- `demo_c_prefill_vs_decode.ipynb` — absorbed into A §03–04b, which also fixes it:
+- `demo_c_prefill_vs_decode.ipynb` — absorbed into Module 1 §03–04b, which also fixes it:
   the original's decode loop re-forwarded the whole sequence every step with no KV
   cache, so its "decode latency" grew with sequence length, contradicting its own
   "~constant per token" summary. In A §04b that uncached loop is still run — but
   deliberately, as the *contrast*, which is the only thing it was ever good for.
-- `demo_e_quantization_batching.ipynb` — merged into Demo B §5.
+- `demo_e_quantization_batching.ipynb` — merged into Module 2 §5.
 - `module1_prefill_vs_decode.ipynb` — its prefill/decode experiments now live in
   A §03–04. Deliberately *not* carried over: the PyTorch profiler section, the
   reflection prompts, and the HTML/PDF report export — course scaffolding for a
@@ -149,9 +169,9 @@ and ran no benchmark.** It was arithmetic over hardcoded constants with
 
 All of the above remain in [`../aiewf-2026/demos/`](../aiewf-2026/demos/).
 
-### Cut from Demo A in the stage rewrite
+### Cut from Module 1 in the stage rewrite
 
-The previous nine-section Demo A is the last version at commit `c9ba1c6`. Three of
+The previous nine-section Module 1 is the last version at commit `c9ba1c6`. Three of
 its sections have no home yet and exist nowhere else, so to read or recover them:
 
 ```bash
@@ -166,7 +186,7 @@ git show c9ba1c6:workshop/odsc-2026/demos/odsc_2026_demo_a_model_memory_prefill_
 | §9 | Providers' output:input price ratio vs our measured single-stream time ratio | The best motivation for batching we have — see *Still to decide* |
 
 Also cut: the `repeat()` median harness, the nine-prompt TTFT sweep, and the
-shared plot-helper layer. (The CPU fallback was cut and then restored — Demo A
+shared plot-helper layer. (The CPU fallback was cut and then restored — Module 1
 runs on Molab.)
 
 ## Still to decide
@@ -193,5 +213,26 @@ runs on Molab.)
 
 ## Setup
 
-TBD. See [`../aiewf-2026/README.md`](../aiewf-2026/README.md) for the Molab +
-Lightning.ai setup used previously.
+**[`SETUP.md`](SETUP.md) — accounts, keys, SSH and the GPU box.** One page,
+about twenty minutes, done before the session starts. It is the only link the
+setup slide needs.
+
+The previous Molab + Lightning.ai setup is in
+[`../aiewf-2026/README.md`](../aiewf-2026/README.md).
+
+## The cluster half — Dodona
+
+The second half of the session leaves this repo. Attendees bring up a real
+cluster — k3s + HAMi on one card split three ways, vLLM prefill and decode
+pools, Prometheus and KEDA — put an admission policy in front of it, and talk to
+it through a voice agent.
+
+| | |
+|---|---|
+| [**Dodona**](https://github.com/harshuljain13/Dodona) | The repo. One card, three slices, a control plane that decides what to let in |
+| [**PREREQUISITES.md**](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md) | Eight numbered steps attendees do before the session: keys, SSH, the GPU box, `.env` |
+| [**README**](https://github.com/harshuljain13/Dodona/blob/main/README.md) | Bring-up — `make cluster`, `make observability`, `make ssh` — and what every command does |
+
+Those live in Dodona rather than here on purpose: they describe that code and
+have to version with it. **This README is the running order; `SETUP.md` is the
+one link on the setup slide.**
