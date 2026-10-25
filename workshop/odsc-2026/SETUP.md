@@ -27,10 +27,17 @@ TinyLlama-1.1B. Same shapes, different absolute numbers.
 
 → [**PREREQUISITES.md**](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md)
 
-Nine numbered steps: your `.env`, Deepgram, Firecrawl, an SSH key, **adding
-that key to RunPod before you launch anything**, the GPU box itself, and a check
-that tells you whether you are ready. The HuggingFace token from §1 is reused
-there, so do §1 first.
+Ten numbered steps, ordered by when you can do them rather than by topic:
+
+- **Now** — a RunPod account and **claim your credits**. It is the one step that
+  can block on somebody else, and a code that silently failed looks exactly like
+  one that worked until you try to launch.
+- **Any evening** — clone the repo, copy `.env`, make an SSH key, and add it to
+  RunPod *before* launching anything.
+- **On the day** — launch the box (this is what starts billing), then collect
+  the Deepgram and Firecrawl keys while it boots.
+
+The HuggingFace token from §1 is reused there, so do §1 first.
 
 Two things from that page worth knowing before you book anything:
 
