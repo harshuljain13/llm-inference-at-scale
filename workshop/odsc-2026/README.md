@@ -57,7 +57,6 @@ instead of restating it — duplicated prose drifts, and setup prose drifts fast
 | File | Owns |
 |---|---|
 | `README.md` (this) | The running order, the arc, and where setup starts |
-| [`DECISIONS.md`](DECISIONS.md) | The design log — why each module is shaped this way, what was cut, what is still open |
 | Each notebook | Its own section index and every number it measures. They open standalone in Colab/Molab, so they never depend on this file |
 | [`demos/…module3_and_4…md`](demos/odsc_2026_module3_and_4_dodona_cluster.md) | Modules 3–4, and the rules for referring to Dodona |
 | [Dodona](https://github.com/harshuljain13/Dodona) | The cluster itself: prerequisites, bring-up, benchmarking |
