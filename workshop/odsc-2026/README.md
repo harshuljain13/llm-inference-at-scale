@@ -37,6 +37,12 @@ the session; it takes a while and most of that is waiting on accounts.
 | 2 · [`odsc_2026_module2_attention_and_quantization.ipynb`](demos/odsc_2026_module2_attention_and_quantization.ipynb) | Given that floor, how do you lower it? Shrink the KV cache (GQA/MQA/MLA) and shrink the weights (INT8/INT4) — and how many users each buys |
 | 3 & 4 · [`odsc_2026_module3_and_4_dodona_cluster.md`](demos/odsc_2026_module3_and_4_dodona_cluster.md) | **Markdown, not a notebook.** Running it for real: prefill/decode split across one sliced card (3), then **admission control** under load (4) |
 
+Plus one engine demo, not yet slotted into the numbering:
+
+| | |
+|---|---|
+| [`odsc_2026_vllm_engine.ipynb`](demos/odsc_2026_vllm_engine.ipynb) | Modules 1–2 are unbatched pure PyTorch on purpose, so every number is attributable. This is the other side: the same model behind vLLM, with continuous batching, prefix caching, KV quantization and speculative decoding switched on one at a time. **Needs a vLLM server already running** — see its §0 |
+
 **1 establishes the bottleneck, 2 attacks it, 3 builds it for real, 4 decides who
 gets turned away.** Each module's opening picks up the previous one's closing
 number deliberately.
