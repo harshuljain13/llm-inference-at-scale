@@ -12,8 +12,8 @@ Everything is in **[Dodona](https://github.com/harshuljain13/Dodona)**.
 | **3** | Bring up the cluster — one card sliced, vLLM prefill and decode split across the slices | [Dodona README](https://github.com/harshuljain13/Dodona/blob/main/README.md) |
 | **4** | Put load on it and watch admission control decide what to let in | [`benchmarking/`](https://github.com/harshuljain13/Dodona/blob/main/benchmarking/README.md) |
 
-**Setup first** — [`PREREQUISITES.md`](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md).
-Begin at [`../SETUP.md`](../SETUP.md), which routes you there.
+**Setup first** — [`PREREQUISITES.md`](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md):
+the box, the keys, the `.env`. Do it before the session.
 
 **No GPU?** Dodona commits its runs, so these modules can be presented cold —
 [`01-health`](https://github.com/harshuljain13/Dodona/tree/main/benchmarking/01-health),

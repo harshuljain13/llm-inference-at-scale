@@ -18,11 +18,16 @@ git clone https://github.com/harshuljain13/llm-inference-at-scale.git
 cd llm-inference-at-scale/workshop/odsc-2026
 ```
 
-**Start at [`SETUP.md`](SETUP.md)** — the only link the setup slide needs. Modules
-1–2 need a HuggingFace account and nothing else. For the cluster half it hands off
-to Dodona's
-**[`PREREQUISITES.md`](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md)**,
-which is the single source of truth for the GPU box, the keys and the `.env`.
+**Modules 1–2** need a HuggingFace account and one click: accept the
+[Mistral-7B licence](https://huggingface.co/mistralai/Mistral-7B-v0.1) *before*
+the session, or the download fails halfway through. Then a read token. Both
+notebooks detect their own hardware and fall back to a smaller model if there is
+no big GPU, so there is nothing else to install.
+
+**Modules 3–4** need a GPU box. Dodona's
+**[`PREREQUISITES.md`](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md)**
+is the single source of truth for it — the box, the keys, the `.env`. Do it before
+the session; it takes a while and most of that is waiting on accounts.
 
 ## Modules
 
@@ -51,8 +56,7 @@ instead of restating it — duplicated prose drifts, and setup prose drifts fast
 
 | File | Owns |
 |---|---|
-| `README.md` (this) | The running order and the arc. Nothing else |
-| [`SETUP.md`](SETUP.md) | Everything before the session: accounts, keys, hardware, the GPU box |
+| `README.md` (this) | The running order, the arc, and where setup starts |
 | [`DECISIONS.md`](DECISIONS.md) | The design log — why each module is shaped this way, what was cut, what is still open |
 | Each notebook | Its own section index and every number it measures. They open standalone in Colab/Molab, so they never depend on this file |
 | [`demos/…module3_and_4…md`](demos/odsc_2026_module3_and_4_dodona_cluster.md) | Modules 3–4, and the rules for referring to Dodona |
