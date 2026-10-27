@@ -14,11 +14,15 @@ git clone https://github.com/harshuljain13/llm-inference-at-scale.git
 cd llm-inference-at-scale/workshop/odsc-2026/demos
 ```
 
-### 2. HuggingFace account
-Modules 1 and 2 load Mistral-7B, which is gated.
-[Accept the licence](https://huggingface.co/mistralai/Mistral-7B-v0.1) — one click —
-then Settings → Access Tokens → **New token**, type *read*. Do it now: without it
-the download fails halfway through.
+### 2. Accounts Setup
+Module 1+2
+- Molab : https://molab.marimo.io/notebooks
+
+Module 3+4
+- Hugging Face + Acccess Token: https://huggingface.co/settings/tokens 
+- Runpod : https://console.runpod.io/ 
+- Deepgram + API Key : https://console.deepgram.com/project/499e0426-7e82-44be-a44c-bda909cb8178/keys 
+- Firecrawl + API Key : https://www.firecrawl.dev/app/t/KaK88LFMgf6/api-keys
 
 ---
 
