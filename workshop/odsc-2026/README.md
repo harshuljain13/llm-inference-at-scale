@@ -14,11 +14,30 @@ git clone https://github.com/harshuljain13/llm-inference-at-scale.git
 cd llm-inference-at-scale/workshop/odsc-2026/demos
 ```
 
-### 2. HuggingFace account
-Modules 1 and 2 load Mistral-7B, which is gated.
+### 2. Accounts and keys
+
+Open these now, not on the day. Each one has a wait in it somewhere — an email
+confirmation, a licence click, a card on file — and all of them are free or
+free-tier except the GPU box.
+
+| | What for | Needed by |
+|---|---|---|
+| [Molab](https://molab.marimo.io/notebooks) | Runs modules 1–2 in the browser, on a free GPU | **1, 2** |
+| [HuggingFace → Access Tokens](https://huggingface.co/settings/tokens) | Downloading the model weights | **1, 2** |
+| [RunPod](https://console.runpod.io/) | The 2 × A100-80 box the cluster runs on, billed by the hour | **3, 4** |
+| [Deepgram](https://console.deepgram.com/) | Speech-to-text for Dodona's voice agent | **3, 4** (voice demo only) |
+
+**HuggingFace, in full:** modules 1 and 2 load Mistral-7B, which is gated.
 [Accept the licence](https://huggingface.co/mistralai/Mistral-7B-v0.1) — one click —
 then Settings → Access Tokens → **New token**, type *read*. Do it now: without it
 the download fails halfway through.
+
+**RunPod** is the only one that costs real money. Two A100-80s run a few dollars
+an hour, and the meter does not stop when you close the tab — stop the pod in the
+console when you are done. Modules 1 and 2 need no GPU of your own at all.
+
+**Deepgram** is needed only if you want to *talk* to the agent. Modules 3 and 4
+work entirely through text and the dashboards without it.
 
 ---
 
@@ -52,11 +71,14 @@ it for real, 4 decides who gets turned away.**
 - The notebook talks to `localhost:8000`. It does not start the server.
 
 **For modules 3 and 4 (Dodona):**
-- A GPU box you ssh to, billed by the hour.
+- A GPU box you ssh to, billed by the hour — 2 × A100-80 on RunPod, one vLLM
+  replica of the 32B per card.
 - Setup is [`PREREQUISITES.md`](https://github.com/harshuljain13/Dodona/blob/main/PREREQUISITES.md)
   in the Dodona repo — the box, the keys, the `.env`. Do it before the session.
-- No GPU? Dodona commits its benchmark reports and Grafana screenshots, so these
-  two can be followed cold.
+- No GPU? Two of the four benchmarks can be followed cold, because their reports
+  and Grafana screenshots are committed: `01-health` and `02-baseline`.
+  `03-capacity` and `04-routing-admission` ship the notebook but no output, so
+  they need a live fleet.
 
 ### Open notebooks on Molab (GPU, free)
 Go to [molab.marimo.io](https://molab.marimo.io) and fork any notebook:
