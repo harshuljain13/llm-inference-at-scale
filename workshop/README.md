@@ -8,6 +8,7 @@ the event-specific outline, demos, and setup instructions.
 |-------|--------|--------|--------|
 | AI Engineering World's Fair 2026 | [`aiewf-2026/`](aiewf-2026/) | 2 hours, June 29 2026 | Delivered — source material |
 | ODSC 2026 | [`odsc-2026/`](odsc-2026/) | TBD | In preparation |
+| NYU 2026 | [`nyu-2026/`](nyu-2026/) | TBD | In preparation |
 
 ## Conventions
 
